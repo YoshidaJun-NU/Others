@@ -7,7 +7,7 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🧪 熱分析，POM")
+st.title("🧪 熱分析&POM")
 
 st.markdown("""
 ### ようこそ
