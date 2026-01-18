@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-# 修正箇所: trapezoid を追加インポート
+# NumPy 2.0対応: trapezoidを使用
 from scipy.integrate import cumulative_trapezoid, trapezoid 
 from scipy.signal import find_peaks, convolve
 from scipy.optimize import curve_fit
@@ -12,6 +12,27 @@ import io
 # --- 定数 ---
 H_PLANCK = 6.62607015e-34
 BOHR_MAGNETON = 9.27401007e-24
+
+# --- メモの内容 (ここに表示したいテキストを記述) ---
+DEFAULT_MEMO = """
+### 📌 解析パラメータ・メモ
+**ファイルごとのパラメータ値の入力ルール**
+
+テキストファイルの以下の行（ヘッダー情報）を読み取って解析します：
+* **4行目**: data length (データ点数)
+* **6行目**: x-range min (測定開始磁場)
+* **7行目**: x-range (磁場掃引幅)
+
+---
+**例 (No.186など)**
+* `data length = 65536`
+* `x-range min = 295` (または 270 など)
+* `x-range     = 50`  (または 100 など)
+
+**注意点**
+* `stats` コマンド等を使う場合は、ファイルの位置（行数）を正確に指定しないとエラーが出ることがあります。
+* 元のデータにおいて、データの末尾（65616行目付近）に `====== Imaginary part data` 等の記述がある場合がありますが、解析範囲外として無視します。
+"""
 
 # --- 物理計算関数 ---
 def calculate_g_factor(magnetic_field_mt, frequency_ghz):
@@ -29,14 +50,10 @@ def calculate_field_from_g(g_value, frequency_ghz):
 
 def lorentzian_derivative(x, amp, center, width):
     """ローレンツ関数の1次微分"""
-    # width は HWHM 相当
     return -amp * (x - center) / ((width**2) + (x - center)**2)**2
 
-# --- シミュレーション用関数 (核スピンの畳み込み) ---
+# --- シミュレーション用関数 ---
 def generate_isotope_pattern(n_nuclei, spin_I):
-    """
-    n個の等価な原子核(スピンI)がある場合の強度比パターンを生成
-    """
     if spin_I == 0.5:
         base = np.array([1, 1])
     elif spin_I == 1.0:
@@ -48,23 +65,17 @@ def generate_isotope_pattern(n_nuclei, spin_I):
     pattern = np.array([1.0])
     for _ in range(n_nuclei):
         pattern = convolve(pattern, base)
-    
     return pattern
 
 def simulate_isotropic(x_axis, g_val, freq, width_mT, a_val_mT, n_nuclei, spin_I):
-    """等方性スペクトルを生成"""
     center_field = calculate_field_from_g(g_val, freq)
-    
     intensities = generate_isotope_pattern(n_nuclei, spin_I)
     total_spin_len = len(intensities)
     indices = np.arange(total_spin_len) - (total_spin_len - 1) / 2
-    
     peak_positions = center_field + indices * a_val_mT
     
     y_sim = np.zeros_like(x_axis)
     w_param = width_mT * np.sqrt(3) / 2
-    
-    # 振幅調整
     amp_factor = 1.0 / np.max(intensities) * (w_param**2) * 5 
 
     for pos, intensity in zip(peak_positions, intensities):
@@ -72,7 +83,6 @@ def simulate_isotropic(x_axis, g_val, freq, width_mT, a_val_mT, n_nuclei, spin_I
         
     if np.max(np.abs(y_sim)) > 0:
         y_sim = y_sim / np.max(np.abs(y_sim))
-        
     return y_sim, peak_positions
 
 # --- メインアプリ ---
@@ -80,7 +90,8 @@ def main():
     st.set_page_config(page_title="ESR Ultimate Analyzer", layout="wide")
     st.title("🧲 ESR Ultimate Analyzer")
     
-    tab1, tab2 = st.tabs(["📊 実験データ解析 & 定量", "🧪 シミュレーション"])
+    # タブを3つに拡張
+    tab1, tab2, tab3 = st.tabs(["📊 実験データ解析 & 定量", "🧪 シミュレーション", "📝 メモ・測定条件"])
 
     # ==========================================
     # Tab 1: 実験データ解析 & 定量
@@ -151,12 +162,9 @@ def main():
                         baseline = np.linspace(signal[0], signal[-1], n_pts)
                         signal = signal - baseline
 
-                    # --- 解析実行 ---
-                    # 1回積分
+                    # 解析実行
                     integ1 = cumulative_trapezoid(signal, field, initial=0)
                     integ1 = integ1 - np.linspace(integ1[0], integ1[-1], n_pts)
-                    
-                    # 2回積分 (修正箇所: np.trapz -> trapezoid)
                     area_val = trapezoid(integ1, field)
 
                     peaks, _ = find_peaks(signal, prominence=0.1*np.max(signal))
@@ -240,26 +248,34 @@ def main():
             
             fig_sim = go.Figure()
             fig_sim.add_trace(go.Scatter(x=x_axis_sim, y=y_sim, name='Simulation', line=dict(color='blue', width=2)))
-            
             for p in peaks_sim:
                 fig_sim.add_vline(x=p, line_width=1, line_dash="dash", line_color="gray", opacity=0.5)
 
             fig_sim.update_layout(
                 title=f"Simulation (g={sim_g}, A={sim_a}mT, n={sim_n})",
                 xaxis_title="Magnetic Field (mT)",
-                yaxis_title="Intensity (Normalized)",
+                yaxis_title="Intensity",
                 height=500
             )
             st.plotly_chart(fig_sim, use_container_width=True)
+
+    # ==========================================
+    # Tab 3: メモ・測定条件 (新規追加)
+    # ==========================================
+    with tab3:
+        st.header("📝 メモ・測定条件")
+        
+        col_memo1, col_memo2 = st.columns([1, 1])
+        
+        with col_memo1:
+            st.info("ℹ️ 測定・解析の基本ルール")
+            # 定数 DEFAULT_MEMO の内容を表示
+            st.markdown(DEFAULT_MEMO)
             
-            sim_df = pd.DataFrame({"Magnetic Field (mT)": x_axis_sim, "Intensity": y_sim})
-            csv_sim = sim_df.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="シミュレーションデータをCSVで保存",
-                data=csv_sim,
-                file_name="esr_simulation.csv",
-                mime="text/csv"
-            )
+        with col_memo2:
+            st.success("🖊️ 自由メモ (一時保存)")
+            st.caption("実験中の気付きや、一時的な数値をここにメモできます（リロードすると消えます）")
+            user_notes = st.text_area("Memo Pad", height=300, placeholder="例：\nSample A: Gain=100, Power=1mW\nSample B: Gain=200...")
 
 if __name__ == "__main__":
     main()
