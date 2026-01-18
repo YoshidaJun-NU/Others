@@ -1,10 +1,10 @@
 import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
 import numpy as np
 from scipy.integrate import cumulative_trapezoid
 from scipy.signal import find_peaks
 import re
+import plotly.graph_objects as go  # Plotlyをインポート
 
 # --- 定数 ---
 H_PLANCK = 6.62607015e-34
@@ -18,13 +18,13 @@ def calculate_g_factor(magnetic_field_mt, frequency_ghz):
     return g
 
 def main():
-    st.set_page_config(page_title="ESR Analyzer Final", layout="wide")
-    st.title("🧲 ESR Spectrum Analyzer (計算式準拠版)")
+    st.set_page_config(page_title="Interactive ESR Analyzer", layout="wide")
+    st.title("🧲 ESR Spectrum Analyzer (Interactive)")
 
     # --- サイドバー：読み込み設定 ---
     st.sidebar.header("1. 読み込み範囲設定")
     
-    # デフォルト値をリクエスト通りに設定
+    # デフォルト値を設定
     default_start = 80
     default_end = 65615
 
@@ -34,9 +34,9 @@ def main():
     st.sidebar.markdown("---")
     st.sidebar.header("2. 磁場パラメータ (X軸)")
     
-    # ユーザーのファイル(No.186)に合わせた例を表示しつつ、デフォルトはテンプレート通りに
-    x_min = st.sidebar.number_input("X-range min (mT)", value=295.0, format="%.4f", help="ファイルのヘッダー(4行目あたり)を確認してください")
-    x_range = st.sidebar.number_input("X-range (mT)", value=50.0, format="%.4f", help="ファイルのヘッダーを確認してください")
+    # ユーザーのファイルヘッダーに合わせたデフォルト値
+    x_min = st.sidebar.number_input("X-range min (mT)", value=295.0, format="%.4f")
+    x_range = st.sidebar.number_input("X-range (mT)", value=50.0, format="%.4f")
     
     st.sidebar.markdown("---")
     st.sidebar.header("3. その他設定")
@@ -102,14 +102,11 @@ def main():
 
             st.success(f"データ読み込み成功: {n_points} 点 (行 {start_line} 〜 {end_line})")
 
-            # --- 4. X軸 (磁場) の生成 [修正箇所] ---
-            # ご指定の計算式: Incr = x_range / Data_points
-            # x[i] = x_min + i * Incr
-            
+            # --- 4. X軸 (磁場) の生成 ---
+            # Incr = x_range / Data_points
             incr = x_range / n_points
             field = x_min + np.arange(n_points) * incr
             
-            # 確認用表示
             st.caption(f"🔧 X軸生成パラメータ: Incr = {incr:.6e} mT (Range {x_range} / Points {n_points})")
 
             # --- 解析処理 ---
@@ -125,38 +122,77 @@ def main():
             peaks_neg, _ = find_peaks(-signal, prominence=peak_prominence * max_amp)
             all_peak_indices = np.sort(np.concatenate([peaks_pos, peaks_neg]))
 
-            # --- グラフ表示 ---
+            # --- グラフ表示 (Plotlyに変更) ---
             col1, col2 = st.columns([2, 1])
 
             with col1:
                 st.subheader("スペクトル (1次微分)")
-                fig, ax = plt.subplots(figsize=(10, 6))
-                ax.plot(field, signal, color='blue', lw=1.0, label='Signal')
                 
+                # Plotlyグラフの作成
+                fig = go.Figure()
+                
+                # メインの信号線
+                fig.add_trace(go.Scatter(
+                    x=field, 
+                    y=signal, 
+                    mode='lines',
+                    name='Signal',
+                    line=dict(color='black', width=1.2),
+                    hovertemplate='Field: %{x:.4f} mT<br>Int: %{y:.4f}<extra></extra>' # マウスオーバー時の表示
+                ))
+                
+                # ピークのマーカー
                 if len(all_peak_indices) > 0:
-                    ax.scatter(field[all_peak_indices], signal[all_peak_indices], color='red', s=20, zorder=5)
+                    fig.add_trace(go.Scatter(
+                        x=field[all_peak_indices],
+                        y=signal[all_peak_indices],
+                        mode='markers',
+                        name='Peaks',
+                        marker=dict(color='red', size=8, symbol='circle-open', line=dict(width=2)),
+                        hovertemplate='Peak<br>Field: %{x:.4f} mT<br>Int: %{y:.4f}<extra></extra>'
+                    ))
+
+                # レイアウト設定
+                fig.update_layout(
+                    xaxis_title="Magnetic Field (mT)",
+                    yaxis_title="Intensity (a.u.)",
+                    margin=dict(l=40, r=40, t=40, b=40),
+                    height=500,
+                    hovermode="closest", # マウスに近い点を表示
+                    showlegend=True
+                )
                 
-                ax.set_xlabel("Magnetic Field (mT)")
-                ax.set_ylabel("Intensity (a.u.)")
-                ax.set_xlim(field[0], field[-1])
-                ax.grid(True, linestyle=':', alpha=0.6)
-                ax.legend()
-                st.pyplot(fig)
+                # Streamlitで表示 (use_container_width=Trueで幅いっぱいに)
+                st.plotly_chart(fig, use_container_width=True)
                 
+                
+                # --- 積分波形の表示 ---
                 st.subheader("吸収波形 (積分)")
                 abs_signal = cumulative_trapezoid(signal, field, initial=0)
-                fig2, ax2 = plt.subplots(figsize=(10, 3))
-                ax2.fill_between(field, abs_signal, color='green', alpha=0.3)
-                ax2.plot(field, abs_signal, color='green', lw=1)
-                ax2.set_xlabel("Magnetic Field (mT)")
-                ax2.set_xlim(field[0], field[-1])
-                st.pyplot(fig2)
+                
+                fig2 = go.Figure()
+                fig2.add_trace(go.Scatter(
+                    x=field,
+                    y=abs_signal,
+                    mode='lines',
+                    name='Absorption',
+                    line=dict(color='forestgreen', width=1.5),
+                    fill='tozeroy', # 0まで塗りつぶし
+                    hovertemplate='Field: %{x:.4f} mT<br>Abs: %{y:.4f}<extra></extra>'
+                ))
+                fig2.update_layout(
+                    xaxis_title="Magnetic Field (mT)",
+                    yaxis_title="Intensity (Integral)",
+                    margin=dict(l=40, r=40, t=20, b=40),
+                    height=300
+                )
+                st.plotly_chart(fig2, use_container_width=True)
 
             with col2:
                 st.subheader("📊 解析結果")
                 
                 if len(peaks_pos) > 0 and len(peaks_neg) > 0:
-                    # g値
+                    # g値計算
                     idx_max_int = peaks_pos[np.argmax(signal[peaks_pos])]
                     idx_min_int = peaks_neg[np.argmax(-signal[peaks_neg])]
                     
