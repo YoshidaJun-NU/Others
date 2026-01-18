@@ -153,8 +153,8 @@ def parse_jeol_value(value_str):
 
 # --- メインアプリ ---
 def main():
-    st.set_page_config(page_title="ESR Ultimate Analyzer", layout="wide")
-    st.title("🧲 ESR Ultimate Analyzer")
+    st.set_page_config(page_title="ESR Analyzer", layout="wide")
+    st.title("🧲 ESR Analyzer")
     
     tab1, tab2, tab3 = st.tabs(["📊 実験データ解析 & 定量", "🧪 シミュレーション", "📝 メモ・測定条件"])
 
