@@ -1,10 +1,12 @@
 import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
 import numpy as np
 from scipy.integrate import cumulative_trapezoid
 from scipy.signal import find_peaks
+from scipy.optimize import curve_fit
 import re
+import plotly.graph_objects as go
+import plotly.express as px
 
 # --- 定数 ---
 H_PLANCK = 6.62607015e-34
@@ -17,184 +19,272 @@ def calculate_g_factor(magnetic_field_mt, frequency_ghz):
     g = (H_PLANCK * freq_hz) / (BOHR_MAGNETON * b_tesla)
     return g
 
+def lorentzian_derivative(x, amp, center, width):
+    return -amp * (x - center) / ((width**2) + (x - center)**2)**2
+
+# --- ヘッダー解析関数 ---
+def parse_header_params(lines):
+    """
+    ファイルのヘッダー行から x-range min, x-range を探す。
+    見つからなければ None を返す。
+    """
+    params = {}
+    
+    # 探索するキーワードと正規表現
+    # 例: "x-range min = 295" または "x-range min=295" などに対応
+    patterns = {
+        "x_min": r"x-range\s*min\s*=\s*([0-9\.]+)",
+        "x_range": r"x-range\s*=\s*([0-9\.]+)"
+    }
+
+    # 最初の20行くらいを走査
+    header_check_limit = 20
+    for i in range(min(len(lines), header_check_limit)):
+        line = lines[i].strip()
+        for key, pattern in patterns.items():
+            if key not in params:
+                match = re.search(pattern, line, re.IGNORECASE)
+                if match:
+                    try:
+                        params[key] = float(match.group(1))
+                    except:
+                        pass
+    
+    return params.get("x_min"), params.get("x_range")
+
 def main():
-    st.set_page_config(page_title="ESR Analyzer Final", layout="wide")
-    st.title("🧲 ESR Spectrum Analyzer (計算式準拠版)")
+    st.set_page_config(page_title="ESR Multi-Plot Analyzer", layout="wide")
+    st.title("🧲 ESR Multi-Spectrum Analyzer (重ね書き対応)")
 
     # --- サイドバー：読み込み設定 ---
-    st.sidebar.header("1. 読み込み範囲設定")
+    st.sidebar.header("1. 読み込み共通設定")
     
-    # デフォルト値をリクエスト通りに設定
+    # 読み込み行のデフォルト
     default_start = 80
     default_end = 65615
+    start_line = st.sidebar.number_input("データ開始行", value=default_start, min_value=1)
+    end_line = st.sidebar.number_input("データ終了行", value=default_end, min_value=1)
 
-    start_line = st.sidebar.number_input("データ開始行 (行番号)", value=default_start, min_value=1)
-    end_line = st.sidebar.number_input("データ終了行 (行番号)", value=default_end, min_value=1)
+    st.sidebar.caption("※ヘッダーから磁場範囲(x-range)を自動取得しますが、取得できない場合は以下のデフォルト値を使用します。")
+    fallback_xmin = st.sidebar.number_input("デフォルト X-min (mT)", value=295.0, format="%.4f")
+    fallback_xrange = st.sidebar.number_input("デフォルト X-range (mT)", value=50.0, format="%.4f")
     
     st.sidebar.markdown("---")
-    st.sidebar.header("2. 磁場パラメータ (X軸)")
+    st.sidebar.header("2. 表示オプション")
+    do_normalize = st.sidebar.checkbox("正規化 (Normalize)", value=False, help="最大強度を1に揃えます")
+    y_offset = st.sidebar.slider("Y軸オフセット (Waterfall)", 0.0, 2.0, 0.0, step=0.1, help="波形を縦にずらして表示します")
     
-    # ユーザーのファイル(No.186)に合わせた例を表示しつつ、デフォルトはテンプレート通りに
-    x_min = st.sidebar.number_input("X-range min (mT)", value=295.0, format="%.4f", help="ファイルのヘッダー(4行目あたり)を確認してください")
-    x_range = st.sidebar.number_input("X-range (mT)", value=50.0, format="%.4f", help="ファイルのヘッダーを確認してください")
-    
-    st.sidebar.markdown("---")
-    st.sidebar.header("3. その他設定")
     freq_ghz = st.sidebar.number_input("測定周波数 (GHz)", value=9.450, format="%.4f")
-    peak_prominence = st.sidebar.slider("ピーク検出感度", 0.01, 1.0, 0.1)
-    do_baseline = st.sidebar.checkbox("ベースライン補正", value=True)
 
-    # --- メインエリア：ファイルアップロード ---
-    uploaded_file = st.file_uploader("データファイル (.txt) をアップロード", type=['txt', 'csv', 'dat'])
+    # --- メインエリア：複数ファイルアップロード ---
+    uploaded_files = st.file_uploader(
+        "データファイルをアップロード (複数選択可)", 
+        type=['txt', 'csv', 'dat'], 
+        accept_multiple_files=True
+    )
 
-    if uploaded_file is not None:
-        try:
-            # 1. ファイルを行ごとに読み込む
-            content_bytes = uploaded_file.read()
+    if uploaded_files:
+        # 全データの格納用リスト
+        dataset_list = []
+
+        # --- 各ファイルをループ処理 ---
+        for u_file in uploaded_files:
             try:
-                content_text = content_bytes.decode('cp932')
-            except UnicodeDecodeError:
-                content_text = content_bytes.decode('utf-8', errors='ignore')
-            
-            lines = content_text.splitlines()
-
-            # 2. ヘッダー情報の確認
-            st.info("ℹ️ ファイルヘッダー情報 (パラメータ確認用)")
-            header_col1, header_col2, header_col3 = st.columns(3)
-            
-            if len(lines) >= 7:
-                with header_col1:
-                    st.text(f"4行目: {lines[3].strip()}")
-                with header_col2:
-                    st.text(f"6行目: {lines[5].strip()}")
-                with header_col3:
-                    st.text(f"7行目: {lines[6].strip()}")
-            else:
-                st.warning("ファイル行数が短いためヘッダーを確認できません。")
-
-            # 3. データ部分の抽出
-            idx_start = start_line - 1
-            idx_end = end_line
-
-            if idx_start < 0 or idx_end > len(lines):
-                st.error(f"指定された行範囲 ( {start_line} 〜 {end_line} ) がファイル行数を超えています。")
-                return
-
-            raw_data_lines = lines[idx_start:idx_end]
-            
-            y_values = []
-            for line in raw_data_lines:
-                line = line.strip()
-                if not line: continue
+                # 読み込み
+                u_file.seek(0)
+                content_bytes = u_file.read()
                 try:
-                    parts = re.split(r'[,\s\t]+', line)
-                    val = float(parts[0])
-                    y_values.append(val)
-                except ValueError:
-                    continue
+                    content_text = content_bytes.decode('cp932')
+                except UnicodeDecodeError:
+                    content_text = content_bytes.decode('utf-8', errors='ignore')
+                
+                lines = content_text.splitlines()
 
-            signal = np.array(y_values)
-            n_points = len(signal)
+                # 1. ヘッダーからパラメータ自動取得
+                auto_xmin, auto_xrange = parse_header_params(lines)
+                
+                # 自動取得できなければサイドバーの値を使う
+                current_xmin = auto_xmin if auto_xmin is not None else fallback_xmin
+                current_xrange = auto_xrange if auto_xrange is not None else fallback_xrange
 
-            if n_points == 0:
-                st.error("有効なデータが見つかりませんでした。")
-                return
+                # 2. データ抽出
+                idx_start = start_line - 1
+                idx_end = end_line
+                
+                if idx_start < 0 or idx_end > len(lines):
+                    continue # 行数不足ならスキップ
 
-            st.success(f"データ読み込み成功: {n_points} 点 (行 {start_line} 〜 {end_line})")
+                raw_lines = lines[idx_start:idx_end]
+                vals = []
+                for ln in raw_lines:
+                    ln = ln.strip()
+                    if not ln: continue
+                    try:
+                        parts = re.split(r'[,\s\t]+', ln)
+                        vals.append(float(parts[0]))
+                    except: continue
+                
+                signal = np.array(vals)
+                n_points = len(signal)
+                
+                if n_points == 0: continue
 
-            # --- 4. X軸 (磁場) の生成 [修正箇所] ---
-            # ご指定の計算式: Incr = x_range / Data_points
-            # x[i] = x_min + i * Incr
+                # 3. X軸生成 (Incr = Range / Points)
+                incr = current_xrange / n_points
+                field = current_xmin + np.arange(n_points) * incr
+
+                # データをリストに追加
+                dataset_list.append({
+                    "filename": u_file.name,
+                    "field": field,
+                    "signal": signal,
+                    "xmin": current_xmin,
+                    "xrange": current_xrange
+                })
+
+            except Exception as e:
+                st.error(f"{u_file.name} の読み込みに失敗: {e}")
+
+        # --- 重ね書きグラフの描画 ---
+        if len(dataset_list) > 0:
+            st.subheader("📈 スペクトル重ね書き (Overlay)")
             
-            incr = x_range / n_points
-            field = x_min + np.arange(n_points) * incr
+            fig = go.Figure()
+            colors = px.colors.qualitative.Plotly # 色パレット
+
+            for i, data in enumerate(dataset_list):
+                y_data = data["signal"]
+                
+                # 正規化処理
+                if do_normalize:
+                    max_val = np.max(np.abs(y_data))
+                    if max_val > 0:
+                        y_data = y_data / max_val
+                
+                # オフセット処理 (新しいファイルほど上にずらす、あるいは下にずらす)
+                # ここでは単純に i * offset
+                display_y = y_data + (i * y_offset)
+
+                fig.add_trace(go.Scatter(
+                    x=data["field"],
+                    y=display_y,
+                    mode='lines',
+                    name=data["filename"],
+                    line=dict(width=1.5),
+                    hovertemplate=f"<b>{data['filename']}</b><br>B: %{{x:.2f}}<br>I: %{{y:.3f}}<extra></extra>"
+                ))
+
+            fig.update_layout(
+                xaxis_title="Magnetic Field (mT)",
+                yaxis_title="Intensity (Normalized/Offset)" if do_normalize or y_offset > 0 else "Intensity (a.u.)",
+                height=600,
+                legend=dict(x=1.02, y=1, xanchor='left', yanchor='top'),
+                margin=dict(r=150) # 凡例のために右マージンを空ける
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+            # --- 個別解析セクション ---
+            st.divider()
+            st.subheader("🔍 個別スペクトルの詳細解析")
             
-            # 確認用表示
-            st.caption(f"🔧 X軸生成パラメータ: Incr = {incr:.6e} mT (Range {x_range} / Points {n_points})")
-
-            # --- 解析処理 ---
-            if do_baseline:
-                baseline = np.linspace(signal[0], signal[-1], n_points)
-                signal = signal - baseline
-
-            # ピーク検出
-            max_amp = np.max(np.abs(signal))
-            if max_amp == 0: max_amp = 1.0
+            # 解析対象を選択
+            filenames = [d["filename"] for d in dataset_list]
+            selected_name = st.selectbox("解析するファイルを選択", filenames)
             
-            peaks_pos, _ = find_peaks(signal, prominence=peak_prominence * max_amp)
-            peaks_neg, _ = find_peaks(-signal, prominence=peak_prominence * max_amp)
-            all_peak_indices = np.sort(np.concatenate([peaks_pos, peaks_neg]))
+            # 選択されたデータを取り出す
+            target_data = next((d for d in dataset_list if d["filename"] == selected_name), None)
 
-            # --- グラフ表示 ---
-            col1, col2 = st.columns([2, 1])
+            if target_data:
+                field = target_data["field"]
+                signal = target_data["signal"]
+                
+                # 解析用設定
+                col_opt1, col_opt2 = st.columns(2)
+                with col_opt1:
+                    peak_prominence = st.slider("ピーク検出感度", 0.01, 1.0, 0.1, key="prominence")
+                with col_opt2:
+                    do_fitting = st.checkbox("カーブフィッティング (Lorentzian)", value=False, key="fitting")
 
-            with col1:
-                st.subheader("スペクトル (1次微分)")
-                fig, ax = plt.subplots(figsize=(10, 6))
-                ax.plot(field, signal, color='blue', lw=1.0, label='Signal')
-                
-                if len(all_peak_indices) > 0:
-                    ax.scatter(field[all_peak_indices], signal[all_peak_indices], color='red', s=20, zorder=5)
-                
-                ax.set_xlabel("Magnetic Field (mT)")
-                ax.set_ylabel("Intensity (a.u.)")
-                ax.set_xlim(field[0], field[-1])
-                ax.grid(True, linestyle=':', alpha=0.6)
-                ax.legend()
-                st.pyplot(fig)
-                
-                st.subheader("吸収波形 (積分)")
-                abs_signal = cumulative_trapezoid(signal, field, initial=0)
-                fig2, ax2 = plt.subplots(figsize=(10, 3))
-                ax2.fill_between(field, abs_signal, color='green', alpha=0.3)
-                ax2.plot(field, abs_signal, color='green', lw=1)
-                ax2.set_xlabel("Magnetic Field (mT)")
-                ax2.set_xlim(field[0], field[-1])
-                st.pyplot(fig2)
+                # ベースライン補正（個別解析時のみ適用）
+                baseline = np.linspace(signal[0], signal[-1], len(signal))
+                signal_corrected = signal - baseline
 
-            with col2:
-                st.subheader("📊 解析結果")
+                # ピーク検出
+                max_amp = np.max(np.abs(signal_corrected))
+                peaks_pos, _ = find_peaks(signal_corrected, prominence=peak_prominence * max_amp)
+                peaks_neg, _ = find_peaks(-signal_corrected, prominence=peak_prominence * max_amp)
                 
-                if len(peaks_pos) > 0 and len(peaks_neg) > 0:
-                    # g値
-                    idx_max_int = peaks_pos[np.argmax(signal[peaks_pos])]
-                    idx_min_int = peaks_neg[np.argmax(-signal[peaks_neg])]
-                    
-                    f_max = field[idx_max_int]
-                    f_min = field[idx_min_int]
-                    
-                    center_field = (f_max + f_min) / 2
-                    g_val = calculate_g_factor(center_field, freq_ghz)
-                    
-                    st.metric("中心 g値", f"{g_val:.5f}")
-                    st.metric("中心磁場", f"{center_field:.2f} mT")
-                    st.metric("線幅 ΔHpp", f"{abs(f_max - f_min):.2f} mT")
+                # --- フィッティング ---
+                popt = None
+                fit_y = None
+                r2 = None
                 
-                st.divider()
-                st.write("**ハイパーファイン分裂 ($A$)**")
-                
-                if len(all_peak_indices) >= 2:
-                    hf_list = []
-                    for i in range(len(all_peak_indices) - 1):
-                        idx1 = all_peak_indices[i]
-                        idx2 = all_peak_indices[i+1]
+                if do_fitting and len(peaks_pos) > 0 and len(peaks_neg) > 0:
+                    try:
+                        # 初期値推定
+                        idx_max = peaks_pos[np.argmax(signal_corrected[peaks_pos])]
+                        idx_min = peaks_neg[np.argmax(-signal_corrected[peaks_neg])]
+                        init_center = (field[idx_max] + field[idx_min]) / 2
+                        init_width = abs(field[idx_max] - field[idx_min]) * np.sqrt(3) / 2
+                        init_amp = np.max(np.abs(signal_corrected)) * (init_width**3) * 5 # 係数調整
+
+                        p0 = [init_amp, init_center, init_width]
+                        popt, _ = curve_fit(lorentzian_derivative, field, signal_corrected, p0=p0, maxfev=5000)
                         
-                        dist = abs(field[idx1] - field[idx2])
-                        avg_f = (field[idx1] + field[idx2]) / 2
-                        curr_g = calculate_g_factor(avg_f, freq_ghz)
-                        a_mhz = curr_g * BOHR_MAGNETON * (dist * 1e-3) / H_PLANCK / 1e6
+                        fit_y = lorentzian_derivative(field, *popt)
                         
-                        hf_list.append({
-                            "Pair": f"{i+1}-{i+2}",
-                            "幅 (mT)": f"{dist:.2f}",
-                            "A (MHz)": f"{a_mhz:.1f}"
-                        })
-                    st.table(pd.DataFrame(hf_list))
-                else:
-                    st.caption("ピークが2つ以上検出されませんでした。")
+                        # R2
+                        ss_res = np.sum((signal_corrected - fit_y)**2)
+                        ss_tot = np.sum((signal_corrected - np.mean(signal_corrected))**2)
+                        r2 = 1 - (ss_res / ss_tot)
+                    except:
+                        st.warning("フィッティングに失敗しました。")
 
-        except Exception as e:
-            st.error(f"エラーが発生しました: {e}")
+                # --- 結果表示 ---
+                res_col1, res_col2 = st.columns([2, 1])
+                
+                with res_col1:
+                    fig_single = go.Figure()
+                    fig_single.add_trace(go.Scatter(x=field, y=signal_corrected, name="Raw (Baseline Corrected)", line=dict(color='black')))
+                    if fit_y is not None:
+                        fig_single.add_trace(go.Scatter(x=field, y=fit_y, name="Fit", line=dict(color='orange', width=2)))
+                    
+                    # ピーク
+                    all_peaks = np.concatenate([peaks_pos, peaks_neg])
+                    if len(all_peaks) > 0:
+                        fig_single.add_trace(go.Scatter(x=field[all_peaks], y=signal_corrected[all_peaks], mode='markers', name='Peaks', marker=dict(color='red')))
+
+                    fig_single.update_layout(height=400, xaxis_title="Magnetic Field (mT)", margin=dict(l=20, r=20, t=20, b=20))
+                    st.plotly_chart(fig_single, use_container_width=True)
+
+                with res_col2:
+                    st.markdown(f"**ファイル:** `{selected_name}`")
+                    st.caption(f"X-range: {target_data['xmin']} 〜 {target_data['xmin']+target_data['xrange']} mT")
+
+                    if popt is not None:
+                        f_center = popt[1]
+                        width_param = abs(popt[2])
+                        delta_hpp = 2 * width_param / np.sqrt(3)
+                        g_val = calculate_g_factor(f_center, freq_ghz)
+                        
+                        st.success("✅ Fitting Result")
+                        st.metric("g値", f"{g_val:.5f}")
+                        st.metric("ΔHpp (mT)", f"{delta_hpp:.3f}")
+                        st.metric("R² (一致度)", f"{r2:.4f}")
+                    
+                    elif len(peaks_pos) > 0 and len(peaks_neg) > 0:
+                        idx_max = peaks_pos[np.argmax(signal_corrected[peaks_pos])]
+                        idx_min = peaks_neg[np.argmax(-signal_corrected[peaks_neg])]
+                        f_pp = abs(field[idx_max] - field[idx_min])
+                        c_pp = (field[idx_max] + field[idx_min]) / 2
+                        g_pp = calculate_g_factor(c_pp, freq_ghz)
+                        
+                        st.info("🔹 Peak-to-Peak Result")
+                        st.metric("g値 (仮)", f"{g_pp:.5f}")
+                        st.metric("ΔHpp (mT)", f"{f_pp:.3f}")
+
+    else:
+        st.info("👈 サイドバーからファイルをアップロードしてください（複数選択可能です）。")
 
 if __name__ == "__main__":
     main()
