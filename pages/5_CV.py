@@ -7,7 +7,7 @@ from scipy.signal import savgol_filter, find_peaks
 
 # --- ページ設定 ---
 st.set_page_config(page_title="CV Analyzer Pro (Ultimate)", layout="wide")
-st.title("⚡ Cyclic Voltammetry Analyzer Pro")
+st.title("⚡ Cyclic Voltammetry Analyzer")
 st.markdown("標準物質校正、サイクル分割、複数ピーク解析、**詳細な原理解説**を搭載。")
 
 # --- セッション状態の初期化 ---
