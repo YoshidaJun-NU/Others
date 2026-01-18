@@ -20,8 +20,9 @@ DEFAULT_MEMO = """
 * **6行目**: x-range min
 * **7行目**: x-range
 
-**Gain自動読み取りについて**
-* ファイルヘッダー内に `amplitude` または `gain` という項目があれば、それを「試料のGain」として自動取得します。
+**Gain自動読み取りについて (JEOL対応)**
+* `amplitude(fine)` と `amplitude(coarse)` を読み取り、掛け合わせた値をGainとします。
+* 例: `am4.00` (Fine) × `10^2` (Coarse: am+2) = **400**
 """
 
 # --- 物理計算関数 ---
@@ -71,10 +72,19 @@ def simulate_isotropic(x_axis, g_val, freq, width_mT, a_val_mT, n_nuclei, spin_I
         y_sim = y_sim / np.max(np.abs(y_sim))
     return y_sim, peak_positions
 
+# --- JEOLパラメータ解析関数 (新規追加) ---
+def parse_jeol_value(value_str):
+    """ 'am4.00' や 'am+2' から数値を抜き出す """
+    # アルファベットを除去して数値部分だけ抽出
+    match = re.search(r'([+\-]?[0-9\.]+)', value_str)
+    if match:
+        return float(match.group(1))
+    return None
+
 # --- メインアプリ ---
 def main():
     st.set_page_config(page_title="ESR Ultimate Analyzer", layout="wide")
-    st.title("🧲 ESR Ultimate Analyzer (Gain自動取得版)")
+    st.title("🧲 ESR Ultimate Analyzer (JEOL Gain対応版)")
     
     tab1, tab2, tab3 = st.tabs(["📊 実験データ解析 & 定量", "🧪 シミュレーション", "📝 メモ・測定条件"])
 
@@ -100,7 +110,6 @@ def main():
 
         if uploaded_file:
             try:
-                # ファイル読み込み
                 content = uploaded_file.read()
                 try:
                     text = content.decode('cp932')
@@ -108,13 +117,16 @@ def main():
                     text = content.decode('utf-8', errors='ignore')
                 lines = text.splitlines()
 
-                # --- ヘッダー自動解析 (パラメータ取得) ---
+                # --- ヘッダー自動解析 (JEOL対応版) ---
                 auto_xmin = None
                 auto_xrange = None
-                auto_gain = None  # Gain格納用
+                
+                amp_fine = None
+                amp_coarse = None
+                auto_gain_val = None # 最終的な計算結果
 
-                # 先頭50行程度を走査
-                for i in range(min(50, len(lines))):
+                # ヘッダー走査
+                for i in range(min(100, len(lines))):
                     line_lower = lines[i].lower()
                     
                     # X-range min
@@ -127,11 +139,23 @@ def main():
                         m = re.search(r"=\s*([0-9\.]+)", line_lower)
                         if m: auto_xrange = float(m.group(1))
                     
-                    # Gain (Amplitude または Receiver Gain)
-                    if "amplitude" in line_lower or "receiver gain" in line_lower:
-                        # "amplitude = 100" のような形式を探す
-                        m = re.search(r"=\s*([0-9\.]+)", line_lower)
-                        if m: auto_gain = float(m.group(1))
+                    # Amplitude (Fine)
+                    # "amplitude(fine)" や "amplitude (fine)" に対応
+                    if "amplitude" in line_lower and "fine" in line_lower and "amplitude2" not in line_lower:
+                        val_str = line_lower.split("=")[-1].strip()
+                        amp_fine = parse_jeol_value(val_str)
+
+                    # Amplitude (Coarse)
+                    if "amplitude" in line_lower and ("coarse" in line_lower or "coars" in line_lower) and "amplitude2" not in line_lower:
+                        val_str = line_lower.split("=")[-1].strip()
+                        amp_coarse = parse_jeol_value(val_str)
+                
+                # Gain計算 (Fine * 10^Coarse)
+                if amp_fine is not None and amp_coarse is not None:
+                    auto_gain_val = amp_fine * (10 ** amp_coarse)
+                elif amp_fine is not None:
+                    # Coarseが見つからない場合はFineのみ採用（稀なケース）
+                    auto_gain_val = amp_fine
 
                 # 採用するパラメータ
                 cur_xmin = auto_xmin if auto_xmin else x_min_in
@@ -180,8 +204,11 @@ def main():
                         st.metric("Area (2回積分)", f"{area_val:.4e}")
                         
                         # --- Gain情報の表示 ---
-                        if auto_gain:
-                            st.success(f"ℹ️ ファイルからGain値を検出: {int(auto_gain)}")
+                        if auto_gain_val:
+                            st.success(f"ℹ️ Gain自動計算: {int(auto_gain_val)}")
+                            st.caption(f"(Fine: {amp_fine} × 10^{int(amp_coarse) if amp_coarse else 0})")
+                        else:
+                            st.info("ℹ️ Gain情報はヘッダーから検出されませんでした")
                         
                         st.divider()
                         st.markdown("#### 🧪 スピン濃度定量")
@@ -196,11 +223,11 @@ def main():
                             
                             st.write("**Gain補正**")
                             # 補正チェックボックス
-                            use_correction = st.checkbox("Gain補正を行う", value=(auto_gain is not None))
+                            use_correction = st.checkbox("Gain補正を行う", value=(auto_gain_val is not None))
                             
                             col_c1, col_c2 = st.columns(2)
                             # 自動取得したGainがあればそれをデフォルト値にする
-                            default_sample_gain = auto_gain if auto_gain else 100.0
+                            default_sample_gain = auto_gain_val if auto_gain_val else 100.0
                             
                             gain_sample = col_c1.number_input("試料のGain", value=default_sample_gain)
                             gain_std = col_c2.number_input("標準のGain", value=100.0)
