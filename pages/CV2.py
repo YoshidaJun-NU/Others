@@ -6,30 +6,31 @@ import plotly.colors as pc
 from scipy.signal import savgol_filter, find_peaks
 
 # --- ページ設定 ---
-st.set_page_config(page_title="CV Analyzer Pro (Multi-Cycle)", layout="wide")
+st.set_page_config(page_title="CV Analyzer Pro (Multi-Pair)", layout="wide")
 st.title("⚡ Cyclic Voltammetry Analyzer Pro")
-st.markdown("標準物質校正、**サイクル別解析**、**複数ピーク検出**に対応した高機能版です。")
+st.markdown("複数ピーク検出、**任意のピークペアによる $E_{1/2}$ 算出**、サイクル分割に対応。")
 
 # --- セッション状態の初期化 ---
 if 'calibration_shift' not in st.session_state:
     st.session_state['calibration_shift'] = 0.0
 if 'is_calibrated' not in st.session_state:
     st.session_state['is_calibrated'] = False
-if 'peak_results' not in st.session_state:
-    st.session_state['peak_results'] = []
+# 保存用リストを2つに分離（単独ピーク用 / 計算ペア用）
+if 'single_peak_results' not in st.session_state:
+    st.session_state['single_peak_results'] = []
+if 'pair_results' not in st.session_state:
+    st.session_state['pair_results'] = []
 
 # --- 解説テキスト ---
 EXPLANATION_TEXT = """
-### 📚 サイクル分割とピーク検出について
+### 📚 複数ペアの $E_{1/2}$ 算出について
 
-#### 1. サイクル分割 (Cycle Splitting)
-連続して測定された複数回のスキャンデータ（マルチサイクル）を、個別のサイクルに分割して解析できます。
-* **初期電圧・最大電圧・最小電圧**を入力することで、電圧の折り返し点を自動検出し、サイクルを切り分けます。
-* 分割されたデータを選択すると、そのサイクルだけのピーク解析が可能になります。
+1つのCV曲線に複数の酸化還元反応が含まれる場合（例：第1酸化、第2酸化...）、それぞれの反応に対応する $E_{pa}$（酸化ピーク）と $E_{pc}$（還元ピーク）を正しく組み合わせる必要があります。
 
-#### 2. 複数ピーク検出
-指定した範囲内に存在する**複数の酸化ピーク（極大）**と**還元ピーク（極小）**を自動で探します。
-* **Prominence (突出度)**: 周囲のベースラインからどれくらい飛び出しているかを基準に検出します。ノイズを拾う場合はこの値を大きくしてください。
+このツールでは以下の手順で複数の $E_{1/2}$ を算出できます：
+1. **ピーク検出**: 自動で極大・極小点をすべて拾い上げます。
+2. **ペアリング**: 検出された候補の中から、対応する酸化・還元ピークをドロップダウンで選択します。
+3. **登録**: 「ペア登録」ボタンを押すと、その組み合わせの $E_{1/2}$ が計算され、リストに追加されます。これを必要な回数繰り返してください。
 """
 
 # --- 関数定義 ---
@@ -60,113 +61,52 @@ def smooth_data(y, window_length=11, polyorder=3):
         return y
 
 def detect_multiple_peaks(v, i, prominence_val=0.0):
-    """
-    指定範囲内のデータから複数のピークを検索してリストで返す。
-    """
-    # データの振幅
+    """指定範囲内のデータから複数のピークを検索してリストで返す"""
     amplitude = np.max(i) - np.min(i)
     prom = amplitude * prominence_val if amplitude > 0 else None
 
     # 上に凸 (Maxima)
     peaks_top_idx, _ = find_peaks(i, prominence=prom)
-    peaks_top = [{"E": v[idx], "I": i[idx], "Type": "Anodic (Top)"} for idx in peaks_top_idx]
+    peaks_top = [{"E": v[idx], "I": i[idx], "Type": "Anodic"} for idx in peaks_top_idx]
 
     # 下に凸 (Minima) -> -i に対して検索
     peaks_btm_idx, _ = find_peaks(-i, prominence=prom)
-    peaks_btm = [{"E": v[idx], "I": i[idx], "Type": "Cathodic (Bottom)"} for idx in peaks_btm_idx]
+    peaks_btm = [{"E": v[idx], "I": i[idx], "Type": "Cathodic"} for idx in peaks_btm_idx]
 
-    # Eの値順（電圧が低い順）にソート
+    # Eの値順にソート
     peaks_top.sort(key=lambda x: x["E"])
     peaks_btm.sort(key=lambda x: x["E"])
 
     return peaks_top, peaks_btm
 
 def split_cycles_by_voltage(v, i, v_init, v_max, v_min):
-    """
-    電圧の折り返し点に基づいてサイクルを分割する簡易ロジック
-    """
-    # 単純化のため、v_initに戻った回数で区切る、あるいは極値のペアで区切る
-    # ここでは「初期値付近を通過」かつ「傾きが開始時と同じ」で分割点を推定
-    
-    # 1. データの微分（方向）
-    grad = np.gradient(v)
-    start_sign = np.sign(grad[0]) if abs(grad[0]) > 0 else 1 # 開始時のスイープ方向
+    """電圧の折り返し点に基づいてサイクルを分割する簡易ロジック"""
+    peaks_high, _ = find_peaks(v, height=v_max - abs(v_max)*0.1)
+    peaks_low, _ = find_peaks(-v, height=-(v_min + abs(v_min)*0.1))
 
-    # 2. v_init との交差判定 (初期値から許容誤差範囲内 かつ 方向が一致)
-    # 許容誤差: スイープ幅の 1%
-    tol = (max(v) - min(v)) * 0.05
-    
-    # 候補点を探す
-    # Init付近 かつ 傾き方向が一致するインデックス
-    candidates = []
-    
-    # ノイズ対策として少しスキップしてから探索開始
-    min_points_per_cycle = 10 
-    
-    last_idx = 0
-    cycles = []
-    
-    # データ全体を走査して分割点を探すのは複雑なので、
-    # 簡易的に「極大・極小のセット」を1サイクルとみなすアプローチをとる
-    
-    # 極大点(High)と極小点(Low)のインデックスを探す
-    # ユーザー入力のV_max, V_minに近い点を探す
-    
-    # 全体の極大・極小候補
-    peaks_high, _ = find_peaks(v, height=v_max - abs(v_max)*0.1) # Max付近
-    peaks_low, _ = find_peaks(-v, height=-(v_min + abs(v_min)*0.1)) # Min付近 (反転してheight)
-
-    # サイクル数推定
     n_cycles = min(len(peaks_high), len(peaks_low))
-    
-    if n_cycles == 0:
-        # 分割失敗時は全データをCycle1とする
-        return [{"v": v, "i": i}]
+    if n_cycles == 0: return [{"v": v, "i": i}]
 
-    # 分割実行
-    # Start -> Max1 -> Min1 -> Start(Next) という構造を想定
-    
-    # 最初の開始点
+    cycles = []
     cycle_start_idx = 0
-    
     for k in range(n_cycles):
-        # このサイクルのMaxとMinのインデックス
-        # 時系列順になっているはず
         p_h = peaks_high[k]
         p_l = peaks_low[k]
-        
-        # 順番が Max -> Min か Min -> Max かは初期スイープ方向による
-        # 終了点を探す: 最後の極値の後、再びInitに戻る点
         last_extremum_idx = max(p_h, p_l)
-        
-        # last_extremum_idx 以降で、v_init に最も近づく点を次の開始点とする
         search_start = last_extremum_idx + 10
         if search_start >= len(v):
             cycle_end_idx = len(v)
         else:
-            # Initとの差分
             diff = np.abs(v[search_start:] - v_init)
-            # 最小点を探す (次のサイクルの始まり)
-            # ただし、単調減少して近づく場合などを見極める必要がある
-            # ここではシンプルに極小値を探す
             local_min_idx = np.argmin(diff)
-            cycle_end_idx = search_start + local_min_idx + 1 # +1で含める
+            cycle_end_idx = search_start + local_min_idx + 1
         
-        # 範囲外ガード
         if cycle_end_idx > len(v): cycle_end_idx = len(v)
-        
-        # スライス
-        v_seg = v[cycle_start_idx:cycle_end_idx]
-        i_seg = i[cycle_start_idx:cycle_end_idx]
-        cycles.append({"v": v_seg, "i": i_seg})
-        
-        cycle_start_idx = cycle_end_idx # 次のスタート
+        cycles.append({"v": v[cycle_start_idx:cycle_end_idx], "i": i[cycle_start_idx:cycle_end_idx]})
+        cycle_start_idx = cycle_end_idx
         if cycle_start_idx >= len(v) - 10: break
 
-    # 残りカスがあれば統合するか捨てるか...ここでは捨てるか、完全なサイクルのみ返す
-    if len(cycles) == 0:
-         return [{"v": v, "i": i}]
-         
+    if len(cycles) == 0: return [{"v": v, "i": i}]
     return cycles
 
 def update_fig_layout(fig, title, x_title, y_title, show_grid, show_mirror, show_ticks, axis_width, font_size):
@@ -230,14 +170,14 @@ with st.sidebar.expander("📊 グラフ表示設定", expanded=False):
 # ==========================================
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "1️⃣ 校正", 
-    "2️⃣ 個別解析", 
+    "2️⃣ 個別解析 (ペア算出)", 
     "3️⃣ 比較・重ね書き", 
     "📝 HOMO/LUMO", 
     "ℹ️ メモ・原理"
 ])
 
 # ==========================================
-# Tab 1: 校正 (変更なし)
+# Tab 1: 校正
 # ==========================================
 with tab1:
     st.header("標準物質による基準電位の決定")
@@ -260,7 +200,6 @@ with tab1:
             v_roi, c_roi = volt[mask], curr[mask]
 
             if len(v_roi) > 0:
-                # 簡易的な最大・最小
                 E_pa, I_pa = v_roi[np.argmax(c_roi)], np.max(c_roi)
                 E_pc, I_pc = v_roi[np.argmin(c_roi)], np.min(c_roi)
                 E_half = (E_pa + E_pc) / 2
@@ -274,20 +213,20 @@ with tab1:
                     st.session_state['calibration_shift'] = E_half
                     st.session_state['is_calibrated'] = True
                     st.success(f"校正完了！ シフト値: {E_half:.4f} V")
-
+                
                 fig = go.Figure()
                 fig.add_trace(go.Scatter(x=volt, y=curr, mode='lines', name='Raw', line=dict(color=custom_color, width=line_width)))
                 fig.add_trace(go.Scatter(x=[E_pa], y=[I_pa], mode='markers', name='Anodic', marker=dict(color='red', size=10)))
                 fig.add_trace(go.Scatter(x=[E_pc], y=[I_pc], mode='markers', name='Cathodic', marker=dict(color='blue', size=10)))
-                fig.add_vline(x=E_half, line_dash="dash", line_color="green", annotation_text="E 1/2")
+                fig.add_vline(x=E_half, line_dash="dash", line_color="green")
                 fig = update_fig_layout(fig, f"Standard ({fc_file.name})", "V", "A", show_grid, show_mirror, show_ticks, axis_width, font_size)
                 st.plotly_chart(fig, use_container_width=True)
 
 # ==========================================
-# Tab 2: 個別解析 (サイクル分割 & 複数ピーク)
+# Tab 2: 個別解析 (ペアリング機能強化)
 # ==========================================
 with tab2:
-    st.header("サンプルデータの個別解析")
+    st.header("サンプル解析と $E_{1/2}$ ペア算出")
     
     shift_val = st.session_state['calibration_shift']
     if st.session_state['is_calibrated']:
@@ -296,201 +235,173 @@ with tab2:
         st.warning("⚠️ 未校正 (元の電圧表示)")
 
     if sample_files:
-        # ファイル選択
         selected_file_obj = st.selectbox("解析するファイルを選択", sample_files, format_func=lambda x: x.name)
         
         if selected_file_obj:
             # データ読み込み
             df_s = load_data(selected_file_obj, skip_rows, sep=data_sep)
-            
             if df_s is not None and df_s.shape[1] >= max(x_col_idx, y_col_idx):
                 v_full = df_s.iloc[:, x_col_idx - 1].values
                 i_full = df_s.iloc[:, y_col_idx - 1].values
                 if smoothing: i_full = smooth_data(i_full)
                 v_full_calib = v_full - shift_val
 
-                # --- サイクル分割設定エリア ---
-                st.markdown("### 🔄 サイクル分割・表示設定")
-                use_cycles = st.checkbox("複数回スキャン（サイクル）として分割する", value=False)
-                
-                # デフォルトの電圧範囲
-                def_init, def_max, def_min = float(v_full[0]), float(np.max(v_full)), float(np.min(v_full))
-                
+                # --- サイクル分割 ---
+                with st.expander("🔄 サイクル分割設定 (必要な場合のみ)", expanded=False):
+                    use_cycles = st.checkbox("サイクル分割モード", value=False)
+                    def_init, def_max, def_min = float(v_full[0]), float(np.max(v_full)), float(np.min(v_full))
+                    c1, c2, c3 = st.columns(3)
+                    with c1: c_init = st.number_input("初期電圧", value=def_init, format="%.2f")
+                    with c2: c_max = st.number_input("最大電圧", value=def_max, format="%.2f")
+                    with c3: c_min = st.number_input("最小電圧", value=def_min, format="%.2f")
+
                 active_v_calib = v_full_calib
                 active_i = i_full
-                cycle_info_str = "全データ"
+                cycle_info_str = "All Data"
 
                 if use_cycles:
-                    col_cy1, col_cy2, col_cy3 = st.columns(3)
-                    with col_cy1: c_init = st.number_input("測定 初期電圧 (V)", value=def_init, step=0.1, format="%.2f")
-                    with col_cy2: c_max = st.number_input("測定 最大電圧 (V)", value=def_max, step=0.1, format="%.2f")
-                    with col_cy3: c_min = st.number_input("測定 最小電圧 (V)", value=def_min, step=0.1, format="%.2f")
-                    
-                    # 分割実行
                     cycles_data = split_cycles_by_voltage(v_full, i_full, c_init, c_max, c_min)
-                    
                     if len(cycles_data) > 0:
-                        # サイクル選択
                         cy_options = [f"Cycle {k+1}" for k in range(len(cycles_data))]
-                        cy_options.insert(0, "All Cycles (Raw)")
-                        selected_cy_label = st.selectbox("表示するサイクルを選択", cy_options)
-                        
-                        if selected_cy_label != "All Cycles (Raw)":
-                            # "Cycle X" を選択
-                            cy_idx = int(selected_cy_label.split(" ")[1]) - 1
-                            active_v_calib = cycles_data[cy_idx]["v"] - shift_val
-                            active_i = cycles_data[cy_idx]["i"]
-                            cycle_info_str = f"{selected_cy_label}"
-                        else:
-                            # 全データ
-                            cycle_info_str = "全データ (重ね書き)"
-                    else:
-                        st.warning("サイクルの分割に失敗しました。条件を見直してください。")
-
-                # --- メイングラフとピーク解析 ---
-                st.divider()
-                st.subheader(f"📈 解析: {selected_file_obj.name} - [{cycle_info_str}]")
+                        cy_options.insert(0, "All Cycles")
+                        selected_cy = st.selectbox("表示サイクル", cy_options)
+                        if selected_cy != "All Cycles":
+                            idx = int(selected_cy.split(" ")[1]) - 1
+                            active_v_calib = cycles_data[idx]["v"] - shift_val
+                            active_i = cycles_data[idx]["i"]
+                            cycle_info_str = selected_cy
                 
-                # 左右分割
-                col_main_L, col_main_R = st.columns([1, 1])
+                st.divider()
+                
+                # --- レイアウト分割 ---
+                col_main_L, col_main_R = st.columns([1, 1.2])
 
+                # --- 左カラム: ピーク検出とペアリング操作 ---
                 with col_main_L:
-                    st.markdown("**1. ピーク検索条件**")
+                    st.subheader("1. ピーク検出 & ペア作成")
+                    
+                    # 探索設定
                     p_min_def, p_max_def = float(np.min(active_v_calib)), float(np.max(active_v_calib))
                     col_p1, col_p2 = st.columns(2)
-                    with col_p1: p_min = st.number_input("探索範囲 Min (V)", value=p_min_def, step=0.1, format="%.2f")
-                    with col_p2: p_max = st.number_input("探索範囲 Max (V)", value=p_max_def, step=0.1, format="%.2f")
-                    
-                    # ピーク検出感度
-                    prominence_val = st.slider("ピーク検出感度 (Prominence)", 0.0, 0.5, 0.01, 0.005, help="値を大きくすると、小さなノイズを無視します。")
-                    
-                    # 範囲内データ抽出
-                    mask_range = (active_v_calib >= p_min) & (active_v_calib <= p_max)
-                    
+                    with col_p1: p_min = st.number_input("Min (V)", value=p_min_def, step=0.1, format="%.2f")
+                    with col_p2: p_max = st.number_input("Max (V)", value=p_max_def, step=0.1, format="%.2f")
+                    prom_val = st.slider("検出感度 (Prominence)", 0.0, 0.5, 0.01, 0.005)
+
                     # 検出実行
+                    mask_range = (active_v_calib >= p_min) & (active_v_calib <= p_max)
                     v_roi = active_v_calib[mask_range]
                     i_roi = active_i[mask_range]
                     
-                    detected_peaks_top = []
-                    detected_peaks_btm = []
-
+                    detected_top = []
+                    detected_btm = []
                     if len(v_roi) > 0:
-                        detected_peaks_top, detected_peaks_btm = detect_multiple_peaks(v_roi, i_roi, prominence_val)
+                        detected_top, detected_btm = detect_multiple_peaks(v_roi, i_roi, prom_val)
 
-                    # --- 検出結果の表示と選択 ---
-                    st.markdown("**2. 検出されたピーク一覧**")
-                    st.caption("登録したいピークにチェックを入れてください")
-                    
-                    selected_peaks_to_add = []
-                    
-                    # 酸化ピーク(Top)
-                    if detected_peaks_top:
-                        st.markdown(f"🔴 **酸化 (極大) ピーク: {len(detected_peaks_top)}個**")
-                        for pk in detected_peaks_top:
-                            chk = st.checkbox(f"{pk['E']:.3f} V (I={pk['I']:.2e})", value=True, key=f"top_{pk['E']}")
-                            if chk: selected_peaks_to_add.append(pk)
-                    else:
-                        st.info("酸化ピークは見つかりませんでした")
+                    st.info(f"検出結果: 酸化 {len(detected_top)}個 / 還元 {len(detected_btm)}個")
 
-                    # 還元ピーク(Bottom)
-                    if detected_peaks_btm:
-                        st.markdown(f"🔵 **還元 (極小) ピーク: {len(detected_peaks_btm)}個**")
-                        for pk in detected_peaks_btm:
-                            chk = st.checkbox(f"{pk['E']:.3f} V (I={pk['I']:.2e})", value=True, key=f"btm_{pk['E']}")
-                            if chk: selected_peaks_to_add.append(pk)
-                    else:
-                        st.info("還元ピークは見つかりませんでした")
+                    # --- ペアリング計算ツール ---
+                    st.markdown("### 🔗 ペアリングと登録")
+                    st.caption("検出されたピークから酸化・還元を1つずつ選び、ペアを作成します。")
+
+                    # 選択用辞書の作成 (表示文字列 -> データオブジェクト)
+                    # 見つからない場合はNoneを扱う
+                    if not detected_top and not detected_btm:
+                        st.warning("ピークが見つかりません。感度や範囲を調整してください。")
                     
-                    # 登録ボタン
-                    if st.button("選択したピークをリストに保存 💾"):
-                        # 単独登録かペア登録か？
-                        # ここではシンプルに「検出されたピーク情報」として保存する
-                        # ただしE1/2を計算するにはペアが必要。
-                        # 今回の要望は「探せるように」なので、個別に保存しつつ、E1/2計算はユーザーに任せるか、
-                        # あるいはTop/Bottomの平均を自動で出すか。
-                        # ここでは「個別のピーク座標」を保存する形にする。
+                    # 選択UI
+                    col_sel1, col_sel2 = st.columns(2)
+                    
+                    # 酸化側プルダウン
+                    ox_map = {f"{p['E']:.4f} V": p for p in detected_top}
+                    ox_key = col_sel1.selectbox("🔴 酸化ピーク ($E_{pa}$)", options=list(ox_map.keys())) if ox_map else None
+                    
+                    # 還元側プルダウン
+                    red_map = {f"{p['E']:.4f} V": p for p in detected_btm}
+                    red_key = col_sel2.selectbox("🔵 還元ピーク ($E_{pc}$)", options=list(red_map.keys())) if red_map else None
+
+                    # 計算と登録ボタン
+                    if ox_key and red_key:
+                        sel_ox = ox_map[ox_key]
+                        sel_red = red_map[red_key]
                         
-                        count = 0
-                        for pk in selected_peaks_to_add:
-                            st.session_state['peak_results'].append({
+                        calc_e_half = (sel_ox['E'] + sel_red['E']) / 2
+                        st.markdown(f"**算出 $E_{1/2}$ = {calc_e_half:.4f} V**")
+                        
+                        if st.button("このペアを登録する 💾", type="primary"):
+                            st.session_state['pair_results'].append({
                                 "File": selected_file_obj.name,
                                 "Cycle": cycle_info_str,
-                                "Type": pk["Type"],
-                                "Potential (V)": pk["E"],
-                                "Current (A)": pk["I"]
+                                "E_pa (V)": sel_ox['E'],
+                                "E_pc (V)": sel_red['E'],
+                                "E_1/2 (V)": calc_e_half,
+                                "I_pa (A)": sel_ox['I'],
+                                "I_pc (A)": sel_red['I']
                             })
-                            count += 1
-                        st.success(f"{count}個のピークを保存しました！")
+                            st.success("登録しました！別のペアを選択して再度登録できます。")
+                    else:
+                        st.caption("酸化・還元の両方が選択されると計算ボタンが表示されます。")
 
+                # --- 右カラム: グラフ表示 ---
                 with col_main_R:
-                    # グラフ描画
                     fig_check = go.Figure()
                     
-                    # 全データ (薄く)
-                    if use_cycles and cycle_info_str != "全データ (重ね書き)":
-                         fig_check.add_trace(go.Scatter(x=v_full_calib, y=i_full, mode='lines', line=dict(color='lightgray'), name="All Data"))
-                    
-                    # アクティブデータ
-                    fig_check.add_trace(go.Scatter(x=active_v_calib, y=active_i, mode='lines', line=dict(color='black', width=2), name="Active Data"))
+                    # 元データ
+                    fig_check.add_trace(go.Scatter(x=active_v_calib, y=active_i, mode='lines', line=dict(color='black', width=2), name="Current Data"))
                     
                     # 探索範囲
-                    fig_check.add_trace(go.Scatter(x=v_roi, y=i_roi, mode='lines', line=dict(color='orange', width=4), opacity=0.4, name="Search Range"))
+                    fig_check.add_trace(go.Scatter(x=v_roi, y=i_roi, mode='lines', line=dict(color='orange', width=4), opacity=0.3, name="Range", showlegend=False))
                     
-                    # 検出されたピークのプロット (未保存のものも表示)
-                    if detected_peaks_top:
-                        x_p = [p['E'] for p in detected_peaks_top]
-                        y_p = [p['I'] for p in detected_peaks_top]
-                        fig_check.add_trace(go.Scatter(x=x_p, y=y_p, mode='markers', marker=dict(color='red', size=10, symbol='circle-open'), name="Detected (Ox)"))
+                    # 検出ピークプロット
+                    if detected_top:
+                        fig_check.add_trace(go.Scatter(
+                            x=[p['E'] for p in detected_top], 
+                            y=[p['I'] for p in detected_top], 
+                            mode='markers', marker=dict(color='red', size=8, symbol='circle-open'), name="Detected Ox"
+                        ))
+                    if detected_btm:
+                        fig_check.add_trace(go.Scatter(
+                            x=[p['E'] for p in detected_btm], 
+                            y=[p['I'] for p in detected_btm], 
+                            mode='markers', marker=dict(color='blue', size=8, symbol='circle-open'), name="Detected Red"
+                        ))
                     
-                    if detected_peaks_btm:
-                        x_p = [p['E'] for p in detected_peaks_btm]
-                        y_p = [p['I'] for p in detected_peaks_btm]
-                        fig_check.add_trace(go.Scatter(x=x_p, y=y_p, mode='markers', marker=dict(color='blue', size=10, symbol='circle-open'), name="Detected (Red)"))
-
-                    # 保存済みピークのプロット
-                    saved = [p for p in st.session_state['peak_results'] if p['File'] == selected_file_obj.name]
-                    if saved:
-                        x_s = [p['Potential (V)'] for p in saved]
-                        y_s = [p['Current (A)'] for p in saved]
-                        fig_check.add_trace(go.Scatter(x=x_s, y=y_s, mode='markers', marker=dict(color='green', size=12, symbol='star'), name="Saved"))
+                    # 登録済みペアの可視化 (E1/2ライン)
+                    saved_pairs = [p for p in st.session_state['pair_results'] if p['File'] == selected_file_obj.name]
+                    for sp in saved_pairs:
+                        fig_check.add_vline(x=sp["E_1/2 (V)"], line_dash="dot", line_color="green", opacity=0.7)
+                        # ペアを結ぶ線など（オプション）
+                        fig_check.add_trace(go.Scatter(
+                            x=[sp["E_pa (V)"], sp["E_pc (V)"]],
+                            y=[sp["I_pa (A)"], sp["I_pc (A)"]],
+                            mode='markers+lines', marker=dict(color='green', size=10, symbol='star'), 
+                            line=dict(color='green', width=1, dash='dot'),
+                            name=f"Pair ({sp['E_1/2 (V)']:.2f}V)"
+                        ))
 
                     fig_check = update_fig_layout(fig_check, f"Analysis: {selected_file_obj.name}", "V vs Fc/Fc+", "Current / A", show_grid, show_mirror, show_ticks, axis_width, font_size)
                     st.plotly_chart(fig_check, use_container_width=True)
 
-                # --- 保存リストの表示 ---
+                # --- 保存リスト表示 ---
                 st.divider()
-                st.markdown("### 📋 保存されたピークリスト")
-                if st.session_state['peak_results']:
-                    res_df = pd.DataFrame(st.session_state['peak_results'])
-                    st.dataframe(res_df, use_container_width=True)
+                st.subheader("📋 登録された酸化還元ペアリスト ($E_{1/2}$)")
+                
+                if st.session_state['pair_results']:
+                    res_df = pd.DataFrame(st.session_state['pair_results'])
+                    # 表示カラム順序の整理
+                    cols = ["File", "Cycle", "E_1/2 (V)", "E_pa (V)", "E_pc (V)", "I_pa (A)", "I_pc (A)"]
+                    st.dataframe(res_df[cols], use_container_width=True)
                     
-                    # E1/2 計算ツール (簡易版)
-                    st.markdown("**🛠️ E1/2 簡易計算機**")
-                    col_calc1, col_calc2, col_calc3 = st.columns(3)
-                    
-                    # ファイル内の酸化・還元ピークを抽出して選択肢にする
-                    current_file_peaks = res_df[res_df['File'] == selected_file_obj.name]
-                    ox_opts = current_file_peaks[current_file_peaks['Type'].str.contains("Anodic")]['Potential (V)'].tolist()
-                    red_opts = current_file_peaks[current_file_peaks['Type'].str.contains("Cathodic")]['Potential (V)'].tolist()
-                    
-                    sel_ox = col_calc1.selectbox("酸化ピークを選択", ox_opts) if ox_opts else None
-                    sel_red = col_calc2.selectbox("還元ピークを選択", red_opts) if red_opts else None
-                    
-                    if sel_ox is not None and sel_red is not None:
-                        calc_half = (sel_ox + sel_red) / 2
-                        col_calc3.metric("計算された E1/2", f"{calc_half:.3f} V")
-                    else:
-                        col_calc3.info("酸化・還元ピークをリストから選択してください")
-
                     if st.button("リストをクリア 🗑️"):
-                        st.session_state['peak_results'] = []
+                        st.session_state['pair_results'] = []
                         st.rerun()
+                else:
+                    st.info("まだペアが登録されていません。")
 
     else:
-        st.info("👈 サイドバーからサンプルデータをアップロードしてください。")
+        st.info("👈 サイドバーからデータをアップロードしてください。")
 
 # ==========================================
-# Tab 3: 比較・重ね書き (変更なし)
+# Tab 3: 比較・重ね書き
 # ==========================================
 with tab3:
     st.header("📊 データの比較・重ね書き")
@@ -539,7 +450,7 @@ with tab3:
         st.info("👈 データなし")
 
 # ==========================================
-# Tab 4 & 5 (省略なし)
+# Tab 4: HOMO/LUMO
 # ==========================================
 with tab4:
     st.header("🧪 HOMO / LUMO レベルの算出")
@@ -554,6 +465,9 @@ with tab4:
         e_red = st.number_input("Reduction Onset (V)", value=-1.5, step=0.01)
         st.metric("LUMO", f"{-(e_red + fc_lv):.2f} eV")
 
+# ==========================================
+# Tab 5: メモ
+# ==========================================
 with tab5:
     st.header("📝 メモ・原理")
     st.markdown(EXPLANATION_TEXT)
