@@ -41,10 +41,23 @@ def main():
 
     if uploaded_file is not None:
         try:
-            # データ読み込み
-            df = pd.read_csv(uploaded_file, skiprows=skip_head, header=None, sep=None, engine='python')
-            df = df.apply(pd.to_numeric, errors='coerce').dropna()
+            # 文字コードの候補
+            encodings = ['cp932', 'utf-8', 'latin1']
+            df = None
             
+            for enc in encodings:
+                try:
+                    uploaded_file.seek(0)
+                    df = pd.read_csv(uploaded_file, skiprows=skip_head, header=None, sep=None, engine='python', encoding=enc)
+                    break # 読み込めたらループを抜ける
+                except:
+                    continue
+            
+            if df is None:
+                st.error("ファイルの読み込みに失敗しました。文字コードを確認してください。")
+                return
+
+            df = df.apply(pd.to_numeric, errors='coerce').dropna()
             raw_field = df.iloc[:, 0].values  # 磁場 (mT)
             signal = df.iloc[:, 1].values     # 信号強度
             

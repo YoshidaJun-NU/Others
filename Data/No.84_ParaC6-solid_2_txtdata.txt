@@ -1,0 +1,74 @@
+set terminal wxt font "arial,16"
+
+# ESR template
+# ファイルごとのパラメータ値の入力
+# textファイルの以下の項目を読み取る（4, 6,7行目）
+# 例えば，
+# data length = 65536
+# x-range min = 270
+# x-range     = 100
+#  !!注意!! statsコマンドを使う場合は，ファイルの位置を詳細に決めないとエラーが出る。
+# 元のデータにおいて，65616行を見ると，data[0..65535] ====== Imaginary part data  Index=0 ===== 
+
+
+##### 必須項目
+#####　ファイルの入力 
+FILE = 'C:\Users\mgask\Box\Gakusei@Box_ver2\2024山岸幹季\para-PI-C6酸化前後\No.186_ParaC6-solid_2_txtdata.txt'
+
+
+##### 数値の入力の際は，ピリオドをうつ（小数まで表示）
+x_min = 270.
+x_range = 100.
+data_length = 65536
+
+#### X軸の範囲
+set xrange [270:370]
+
+
+### 状況に応じて
+### X軸の目盛り幅
+set xtics 10
+#set ytics 100
+
+
+
+# 実際のデータ数と増分の計算
+Data_points =  data_length
+Incr = x_range/Data_points
+
+# ファイルの読み込み 80行目から65615行目まで
+stats FILE every ::80::65615 nooutput
+
+#　データ数
+N = STATS_records
+
+# 配列A (x軸)の設定 N+1にする必要あり
+array A[N+1]
+do for [i=1:N] {A[i] = x_min + (i-1)*Incr}
+
+# 配列B (y軸)の設定 N+1にする必要あり
+array B[N+1]
+stats FILE every ::80::65615 using (B[$0+1] = $1,0) nooutput
+
+#### タイトルや色を適宜変更
+plot B using (A[$1]):2 with lines linecolor rgbcolor "blue" t "after"
+
+### 凡例の位置 left, right, top, bottom, outside, below
+set key right
+
+# 凡例非表示にする場合
+#unset key
+
+
+
+#軸の設定
+set xlabel '{/Arial-italic=16 mT}'
+set xzeroaxis lt 0
+set tics out
+unset x2zeroaxis
+unset y2zeroaxis
+
+
+
+replot
+
