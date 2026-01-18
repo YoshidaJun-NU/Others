@@ -18,14 +18,13 @@ def calculate_g_factor(magnetic_field_mt, frequency_ghz):
     return g
 
 def main():
-    st.set_page_config(page_title="ESR Analyzer Special", layout="wide")
-    st.title("🧲 ESR Spectrum Analyzer (カスタム読み込み版)")
+    st.set_page_config(page_title="ESR Analyzer Final", layout="wide")
+    st.title("🧲 ESR Spectrum Analyzer (計算式準拠版)")
 
     # --- サイドバー：読み込み設定 ---
     st.sidebar.header("1. 読み込み範囲設定")
     
     # デフォルト値をリクエスト通りに設定
-    # ユーザーにとっての「80行目」は、プログラム(0始まり)ではインデックス79
     default_start = 80
     default_end = 65615
 
@@ -34,12 +33,10 @@ def main():
     
     st.sidebar.markdown("---")
     st.sidebar.header("2. 磁場パラメータ (X軸)")
-    # デフォルト値
-    default_xmin = 270.0
-    default_xrange = 100.0
     
-    x_min = st.sidebar.number_input("X-range min (mT)", value=default_xmin, format="%.2f")
-    x_range = st.sidebar.number_input("X-range (mT)", value=default_xrange, format="%.2f")
+    # ユーザーのファイル(No.186)に合わせた例を表示しつつ、デフォルトはテンプレート通りに
+    x_min = st.sidebar.number_input("X-range min (mT)", value=295.0, format="%.4f", help="ファイルのヘッダー(4行目あたり)を確認してください")
+    x_range = st.sidebar.number_input("X-range (mT)", value=50.0, format="%.4f", help="ファイルのヘッダーを確認してください")
     
     st.sidebar.markdown("---")
     st.sidebar.header("3. その他設定")
@@ -52,11 +49,8 @@ def main():
 
     if uploaded_file is not None:
         try:
-            # 1. ファイルを行ごとに読み込む (Shift-JIS/cp932対応)
-            # バイナリとして読んでデコード
+            # 1. ファイルを行ごとに読み込む
             content_bytes = uploaded_file.read()
-            
-            # 文字コード判定（cp932優先、だめならutf-8）
             try:
                 content_text = content_bytes.decode('cp932')
             except UnicodeDecodeError:
@@ -64,14 +58,11 @@ def main():
             
             lines = content_text.splitlines()
 
-            # 2. ヘッダー情報の確認 (4, 6, 7行目)
-            # Pythonのリストは0始まりなので、4行目はindex 3
-            st.info("ℹ️ ファイルヘッダー情報 (確認用)")
+            # 2. ヘッダー情報の確認
+            st.info("ℹ️ ファイルヘッダー情報 (パラメータ確認用)")
             header_col1, header_col2, header_col3 = st.columns(3)
             
-            # 安全にアクセスするために長さをチェック
             if len(lines) >= 7:
-                # 行の内容を表示（前後の空白除去）
                 with header_col1:
                     st.text(f"4行目: {lines[3].strip()}")
                 with header_col2:
@@ -79,12 +70,11 @@ def main():
                 with header_col3:
                     st.text(f"7行目: {lines[6].strip()}")
             else:
-                st.warning("ファイル行数が短いため、指定のヘッダー行を確認できませんでした。")
+                st.warning("ファイル行数が短いためヘッダーを確認できません。")
 
             # 3. データ部分の抽出
-            # ユーザー指定の行番号をPythonのインデックスに変換（-1する）
             idx_start = start_line - 1
-            idx_end = end_line  # スライスは終了を含まないのでそのまま
+            idx_end = end_line
 
             if idx_start < 0 or idx_end > len(lines):
                 st.error(f"指定された行範囲 ( {start_line} 〜 {end_line} ) がファイル行数を超えています。")
@@ -92,45 +82,44 @@ def main():
 
             raw_data_lines = lines[idx_start:idx_end]
             
-            # 数値変換処理
             y_values = []
             for line in raw_data_lines:
                 line = line.strip()
-                if not line: continue  # 空行はスキップ
+                if not line: continue
                 try:
-                    # 数値としてパース (区切り文字がある場合は最初の要素を取得)
-                    # "123.45" や "123.45  0.00" のような形式に対応
                     parts = re.split(r'[,\s\t]+', line)
                     val = float(parts[0])
                     y_values.append(val)
                 except ValueError:
-                    continue # 数値変換できない行は無視
+                    continue
 
             signal = np.array(y_values)
             n_points = len(signal)
 
             if n_points == 0:
-                st.error("指定範囲内に有効な数値データが見つかりませんでした。")
+                st.error("有効なデータが見つかりませんでした。")
                 return
 
             st.success(f"データ読み込み成功: {n_points} 点 (行 {start_line} 〜 {end_line})")
 
-            # 4. X軸 (磁場) の生成
-            # x_min から x_min + x_range までを等分割
-            # Gnuplotの仕様に合わせて生成
-            field = np.linspace(x_min, x_min + x_range, n_points)
-
-            # --- 解析処理 (既存ロジック) ---
+            # --- 4. X軸 (磁場) の生成 [修正箇所] ---
+            # ご指定の計算式: Incr = x_range / Data_points
+            # x[i] = x_min + i * Incr
             
-            # ベースライン補正
+            incr = x_range / n_points
+            field = x_min + np.arange(n_points) * incr
+            
+            # 確認用表示
+            st.caption(f"🔧 X軸生成パラメータ: Incr = {incr:.6e} mT (Range {x_range} / Points {n_points})")
+
+            # --- 解析処理 ---
             if do_baseline:
                 baseline = np.linspace(signal[0], signal[-1], n_points)
                 signal = signal - baseline
 
             # ピーク検出
-            # 信号の絶対値の最大値を基準にプロミネンスを設定
             max_amp = np.max(np.abs(signal))
-            if max_amp == 0: max_amp = 1.0 # ゼロ除算防止
+            if max_amp == 0: max_amp = 1.0
             
             peaks_pos, _ = find_peaks(signal, prominence=peak_prominence * max_amp)
             peaks_neg, _ = find_peaks(-signal, prominence=peak_prominence * max_amp)
@@ -144,33 +133,30 @@ def main():
                 fig, ax = plt.subplots(figsize=(10, 6))
                 ax.plot(field, signal, color='blue', lw=1.0, label='Signal')
                 
-                # ピークプロット
                 if len(all_peak_indices) > 0:
                     ax.scatter(field[all_peak_indices], signal[all_peak_indices], color='red', s=20, zorder=5)
                 
                 ax.set_xlabel("Magnetic Field (mT)")
                 ax.set_ylabel("Intensity (a.u.)")
-                ax.set_xlim(x_min, x_min + x_range) # X軸範囲を固定
+                ax.set_xlim(field[0], field[-1])
                 ax.grid(True, linestyle=':', alpha=0.6)
                 ax.legend()
                 st.pyplot(fig)
                 
-                # 積分波形
                 st.subheader("吸収波形 (積分)")
                 abs_signal = cumulative_trapezoid(signal, field, initial=0)
                 fig2, ax2 = plt.subplots(figsize=(10, 3))
                 ax2.fill_between(field, abs_signal, color='green', alpha=0.3)
                 ax2.plot(field, abs_signal, color='green', lw=1)
                 ax2.set_xlabel("Magnetic Field (mT)")
-                ax2.set_xlim(x_min, x_min + x_range)
+                ax2.set_xlim(field[0], field[-1])
                 st.pyplot(fig2)
 
             with col2:
                 st.subheader("📊 解析結果")
                 
                 if len(peaks_pos) > 0 and len(peaks_neg) > 0:
-                    # g値 (最大-最小の中心)
-                    # 最も強度の高いペアを探す簡易ロジック
+                    # g値
                     idx_max_int = peaks_pos[np.argmax(signal[peaks_pos])]
                     idx_min_int = peaks_neg[np.argmax(-signal[peaks_neg])]
                     
@@ -194,8 +180,6 @@ def main():
                         idx2 = all_peak_indices[i+1]
                         
                         dist = abs(field[idx1] - field[idx2])
-                        
-                        # A値換算
                         avg_f = (field[idx1] + field[idx2]) / 2
                         curr_g = calculate_g_factor(avg_f, freq_ghz)
                         a_mhz = curr_g * BOHR_MAGNETON * (dist * 1e-3) / H_PLANCK / 1e6
