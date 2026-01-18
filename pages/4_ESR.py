@@ -1,7 +1,8 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from scipy.integrate import cumulative_trapezoid
+# 修正箇所: trapezoid を追加インポート
+from scipy.integrate import cumulative_trapezoid, trapezoid 
 from scipy.signal import find_peaks, convolve
 from scipy.optimize import curve_fit
 import re
@@ -35,16 +36,12 @@ def lorentzian_derivative(x, amp, center, width):
 def generate_isotope_pattern(n_nuclei, spin_I):
     """
     n個の等価な原子核(スピンI)がある場合の強度比パターンを生成
-    I=0.5 (H) -> Pascal's triangle (1, 1) -> (1, 2, 1) ...
-    I=1.0 (N) -> (1, 1, 1) -> (1, 2, 3, 2, 1) ...
     """
-    # 基本核のパターン
     if spin_I == 0.5:
         base = np.array([1, 1])
     elif spin_I == 1.0:
         base = np.array([1, 1, 1])
     else:
-        # 簡易対応: I=1.5 (e.g. 7Li, 23Na) など必要ならここに追加
         len_vec = int(2*spin_I + 1)
         base = np.ones(len_vec)
 
@@ -58,30 +55,21 @@ def simulate_isotropic(x_axis, g_val, freq, width_mT, a_val_mT, n_nuclei, spin_I
     """等方性スペクトルを生成"""
     center_field = calculate_field_from_g(g_val, freq)
     
-    # 強度パターンと相対位置の計算
     intensities = generate_isotope_pattern(n_nuclei, spin_I)
-    
-    # 全スピン量子数 F_total
     total_spin_len = len(intensities)
-    # 中心からのインデックスずれ (0を中心にする)
     indices = np.arange(total_spin_len) - (total_spin_len - 1) / 2
     
-    # 各ピークの磁場位置
     peak_positions = center_field + indices * a_val_mT
     
-    # スペクトル合成
     y_sim = np.zeros_like(x_axis)
-    # width_mT は Peak-to-Peak (dHpp) として入力されることが多い
-    # Lorentzian関数内のwidthパラメータ(HWHM)への変換: w = dHpp * sqrt(3) / 2
     w_param = width_mT * np.sqrt(3) / 2
     
-    # 振幅調整 (最大値を概ね1にするための係数)
+    # 振幅調整
     amp_factor = 1.0 / np.max(intensities) * (w_param**2) * 5 
 
     for pos, intensity in zip(peak_positions, intensities):
         y_sim += lorentzian_derivative(x_axis, intensity * amp_factor, pos, w_param)
         
-    # 正規化 (-1 to 1)
     if np.max(np.abs(y_sim)) > 0:
         y_sim = y_sim / np.max(np.abs(y_sim))
         
@@ -92,7 +80,6 @@ def main():
     st.set_page_config(page_title="ESR Ultimate Analyzer", layout="wide")
     st.title("🧲 ESR Ultimate Analyzer")
     
-    # タブ設定
     tab1, tab2 = st.tabs(["📊 実験データ解析 & 定量", "🧪 シミュレーション"])
 
     # ==========================================
@@ -101,7 +88,6 @@ def main():
     with tab1:
         st.header("実験データの解析・定量")
         
-        # --- サイドバー (Tab1用) ---
         with st.sidebar:
             st.header("1. [解析] 読み込み設定")
             default_start = 80
@@ -121,7 +107,6 @@ def main():
         uploaded_file = st.file_uploader("データファイル (.txt) をアップロード", type=['txt', 'csv'])
 
         if uploaded_file:
-            # --- 読み込み処理 ---
             try:
                 content = uploaded_file.read()
                 try:
@@ -130,7 +115,7 @@ def main():
                     text = content.decode('utf-8', errors='ignore')
                 lines = text.splitlines()
 
-                # ヘッダー自動取得トライ
+                # ヘッダー自動取得
                 auto_xmin = None
                 auto_xrange = None
                 for i in range(min(20, len(lines))):
@@ -141,11 +126,9 @@ def main():
                         m = re.search(r"=\s*([0-9\.]+)", lines[i])
                         if m: auto_xrange = float(m.group(1))
                 
-                # 採用するパラメータ
                 cur_xmin = auto_xmin if auto_xmin else x_min_in
                 cur_xrange = auto_xrange if auto_xrange else x_range_in
 
-                # データ抽出
                 idx_s = start_line - 1
                 idx_e = end_line
                 raw_data = []
@@ -169,18 +152,15 @@ def main():
                         signal = signal - baseline
 
                     # --- 解析実行 ---
-                    # 1回積分 (吸収波形)
+                    # 1回積分
                     integ1 = cumulative_trapezoid(signal, field, initial=0)
-                    # ベースライン補正(積分後) - 積分するとドリフトしやすいため
                     integ1 = integ1 - np.linspace(integ1[0], integ1[-1], n_pts)
                     
-                    # 2回積分 (面積)
-                    area_val = np.trapz(integ1, field)
+                    # 2回積分 (修正箇所: np.trapz -> trapezoid)
+                    area_val = trapezoid(integ1, field)
 
-                    # ピーク検出
                     peaks, _ = find_peaks(signal, prominence=0.1*np.max(signal))
                     
-                    # --- グラフ表示 ---
                     col_g1, col_g2 = st.columns([2, 1])
                     with col_g1:
                         st.subheader("スペクトル")
@@ -197,18 +177,15 @@ def main():
                         
                         st.divider()
                         st.markdown("#### 🧪 スピン濃度定量")
-                        st.caption("標準試料と比較して濃度を計算します")
                         
-                        # --- 定量計算フォーム ---
                         with st.form("quant_form"):
                             st.write("試料情報:")
                             sample_mass = st.number_input("測定試料の質量 (mg)", value=1.0, format="%.2f")
                             
                             st.write("標準試料 (Standard) 情報:")
                             std_area = st.number_input("標準試料のArea値", value=1.0e5, format="%.2e")
-                            std_spins = st.number_input("標準試料の総スピン数", value=1.0e15, format="%.2e", help="既知の濃度×質量で求めた総数")
+                            std_spins = st.number_input("標準試料の総スピン数", value=1.0e15, format="%.2e")
                             
-                            # 補正係数 (Gainなど)
                             use_correction = st.checkbox("測定条件(Gain)の補正を行う", value=False)
                             if use_correction:
                                 col_c1, col_c2 = st.columns(2)
@@ -221,15 +198,11 @@ def main():
                             calc_btn = st.form_submit_button("定量計算実行")
                         
                         if calc_btn:
-                            # 計算ロジック:
-                            # N_sample = N_std * (Area_sample / Area_std) * (Gain_std / Gain_sample)
                             n_sample_total = std_spins * (area_val / std_area) * factor
-                            spin_conc = n_sample_total / (sample_mass * 1e-3) # spins/g
+                            spin_conc = n_sample_total / (sample_mass * 1e-3)
                             
                             st.success(f"総スピン数: {n_sample_total:.2e} spins")
                             st.error(f"スピン濃度: {spin_conc:.2e} spins/g")
-                            if use_correction:
-                                st.caption(f"Gain補正係数: {factor:.2f}")
 
             except Exception as e:
                 st.error(f"解析エラー: {e}")
@@ -244,40 +217,30 @@ def main():
         
         with col_sim_set:
             st.subheader("パラメータ設定")
-            
-            # 基本パラメータ
             sim_freq = st.number_input("周波数 (GHz)", value=9.450, format="%.4f", key="sim_freq")
             sim_g = st.number_input("中心 g値", value=2.0060, format="%.5f")
             sim_width = st.number_input("線幅 ΔHpp (mT)", value=0.5, step=0.1)
             
             st.divider()
             st.markdown("**超微細結合 (Hyperfine)**")
-            
-            # 核種設定
             nuc_type = st.radio("核スピン (I)", [0.5, 1.0], format_func=lambda x: "I=1/2 (H, P, F)" if x==0.5 else "I=1 (N, D)")
             sim_n = st.number_input("等価な核の数 (n)", value=1, min_value=0, step=1)
             sim_a = st.number_input("結合定数 A値 (mT)", value=1.5, step=0.1)
             
             st.divider()
-            st.markdown("**表示範囲**")
             sim_center_mT = calculate_field_from_g(sim_g, sim_freq)
             sim_range = st.number_input("表示幅 (mT)", value=10.0)
             
         with col_sim_plot:
-            # シミュレーション実行
-            # 軸作成
             x_sim_min = sim_center_mT - sim_range/2
             x_sim_max = sim_center_mT + sim_range/2
             x_axis_sim = np.linspace(x_sim_min, x_sim_max, 2000)
             
-            # 計算
             y_sim, peaks_sim = simulate_isotropic(x_axis_sim, sim_g, sim_freq, sim_width, sim_a, int(sim_n), nuc_type)
             
-            # プロット
             fig_sim = go.Figure()
             fig_sim.add_trace(go.Scatter(x=x_axis_sim, y=y_sim, name='Simulation', line=dict(color='blue', width=2)))
             
-            # ピーク位置のバーコード表示
             for p in peaks_sim:
                 fig_sim.add_vline(x=p, line_width=1, line_dash="dash", line_color="gray", opacity=0.5)
 
@@ -289,7 +252,6 @@ def main():
             )
             st.plotly_chart(fig_sim, use_container_width=True)
             
-            # ダウンロードボタン
             sim_df = pd.DataFrame({"Magnetic Field (mT)": x_axis_sim, "Intensity": y_sim})
             csv_sim = sim_df.to_csv(index=False).encode('utf-8')
             st.download_button(
