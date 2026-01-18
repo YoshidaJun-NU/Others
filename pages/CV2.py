@@ -7,7 +7,7 @@ from scipy.signal import savgol_filter, find_peaks
 
 # --- ページ設定 ---
 st.set_page_config(page_title="CV Analyzer Pro (Multi-Pair)", layout="wide")
-st.title("⚡ Cyclic Voltammetry Analyzer Pro")
+st.title("⚡ Cyclic Voltammetry Analyzer")
 st.markdown("複数ピーク検出、**任意のピークペアによる $E_{1/2}$ 算出**、サイクル分割に対応。")
 
 # --- セッション状態の初期化 ---
