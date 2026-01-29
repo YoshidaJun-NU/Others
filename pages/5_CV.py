@@ -128,6 +128,7 @@ def update_fig_layout(fig, title, x_title, y_title, show_grid, show_mirror, show
 # サイドバー設定
 # ==========================================
 st.sidebar.header("📂 データ設定")
+st.sidebar.caption("※以下の設定は「個別解析・比較」タブのサンプルデータに適用されます。")
 with st.sidebar.expander("列番号・フォーマット", expanded=False):
     c1, c2 = st.columns(2)
     with c1: x_col_idx = st.number_input("横軸 (E) 列", value=2, min_value=1)
@@ -160,16 +161,34 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 ])
 
 # ==========================================
-# Tab 1: 校正
+# Tab 1: 校正 (修正箇所)
 # ==========================================
 with tab1:
     st.header("標準物質による基準電位の決定")
+
+    # --- 修正: フェロセン専用の設定エリアを追加 ---
+    with st.expander("⚙️ フェロセン読み込み設定 (列・ヘッダー)", expanded=False):
+        st.caption("サンプルデータと形式が異なる場合、ここで指定してください。")
+        fc_cols = st.columns(3)
+        with fc_cols[0]:
+            fc_x_col = st.number_input("横軸 (E) 列", value=2, min_value=1, key="fc_x")
+        with fc_cols[1]:
+            fc_y_col = st.number_input("縦軸 (I) 列", value=3, min_value=1, key="fc_y")
+        with fc_cols[2]:
+            fc_skip_rows = st.number_input("ヘッダー行数", value=1, min_value=0, key="fc_skip")
+    # ---------------------------------------------
+
     fc_file = st.file_uploader("標準物質 (例: Ferrocene)", type=['csv', 'txt', 'dat'], key="fc_u")
+    
     if fc_file:
-        df_fc = load_data(fc_file, skip_rows, sep=data_sep)
-        if df_fc is not None and df_fc.shape[1] >= max(x_col_idx, y_col_idx):
-            v_fc = df_fc.iloc[:, x_col_idx-1].values
-            i_fc = df_fc.iloc[:, y_col_idx-1].values
+        # 修正: fc_skip_rows を使用して読み込み
+        df_fc = load_data(fc_file, fc_skip_rows, sep=data_sep)
+        
+        # 修正: fc_x_col, fc_y_col を使用してデータ抽出
+        if df_fc is not None and df_fc.shape[1] >= max(fc_x_col, fc_y_col):
+            v_fc = df_fc.iloc[:, fc_x_col-1].values
+            i_fc = df_fc.iloc[:, fc_y_col-1].values
+            
             if smoothing: i_fc = smooth_data(i_fc)
             
             c_fc1, c_fc2 = st.columns(2)
@@ -203,6 +222,8 @@ with tab1:
                 fig.add_vline(x=E_half, line_dash='dash', line_color='green')
                 fig = update_fig_layout(fig, f"Standard ({fc_file.name})", "V", "A", show_grid, show_mirror, show_ticks, axis_width, font_size)
                 st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.error(f"データの列数が不足しています。指定: 横{fc_x_col}列目 / 縦{fc_y_col}列目 (データ列数: {df_fc.shape[1] if df_fc is not None else 0})")
 
 # ==========================================
 # Tab 2: 個別解析 (ピーク検出 & ペア登録)
@@ -250,45 +271,49 @@ with tab2:
                 
                 with col_L:
                     st.subheader("1. ピーク検出")
-                    pm, pM = float(np.min(active_v)), float(np.max(active_v))
-                    c_p1, c_p2 = st.columns(2)
-                    p_min = c_p1.number_input("Min (V)", value=pm, step=0.1, format="%.2f")
-                    p_max = c_p2.number_input("Max (V)", value=pM, step=0.1, format="%.2f")
-                    prom = st.slider("感度 (Prominence)", 0.0, 0.5, 0.01, 0.005)
+                    if len(active_v) > 0:
+                        pm, pM = float(np.min(active_v)), float(np.max(active_v))
+                        c_p1, c_p2 = st.columns(2)
+                        p_min = c_p1.number_input("Min (V)", value=pm, step=0.1, format="%.2f")
+                        p_max = c_p2.number_input("Max (V)", value=pM, step=0.1, format="%.2f")
+                        prom = st.slider("感度 (Prominence)", 0.0, 0.5, 0.01, 0.005)
 
-                    mask = (active_v >= p_min) & (active_v <= p_max)
-                    v_r, i_r = active_v[mask], active_i[mask]
-                    d_top, d_btm = [], []
-                    if len(v_r) > 0:
-                        d_top, d_btm = detect_multiple_peaks(v_r, i_r, prom)
-                    
-                    st.caption(f"検出: 酸化{len(d_top)} / 還元{len(d_btm)}")
+                        mask = (active_v >= p_min) & (active_v <= p_max)
+                        v_r, i_r = active_v[mask], active_i[mask]
+                        d_top, d_btm = [], []
+                        if len(v_r) > 0:
+                            d_top, d_btm = detect_multiple_peaks(v_r, i_r, prom)
+                        
+                        st.caption(f"検出: 酸化{len(d_top)} / 還元{len(d_btm)}")
 
-                    st.subheader("2. ペア作成・登録")
-                    if not d_top and not d_btm:
-                        st.warning("ピークなし")
+                        st.subheader("2. ペア作成・登録")
+                        if not d_top and not d_btm:
+                            st.warning("ピークなし")
+                        else:
+                            c_s1, c_s2 = st.columns(2)
+                            ox_map = {f"{p['E']:.3f} V": p for p in d_top}
+                            red_map = {f"{p['E']:.3f} V": p for p in d_btm}
+                            k_ox = c_s1.selectbox("酸化ピーク", list(ox_map.keys())) if ox_map else None
+                            k_red = c_s2.selectbox("還元ピーク", list(red_map.keys())) if red_map else None
+
+                            if k_ox and k_red:
+                                s_ox, s_red = ox_map[k_ox], red_map[k_red]
+                                val_half = (s_ox['E'] + s_red['E']) / 2
+                                st.success(f"**$E_{{1/2}}$ = {val_half:.4f} V**")
+                                if st.button("このペアを登録 💾"):
+                                    st.session_state['pair_results'].append({
+                                        "File": sel_file.name, "Cycle": cy_info,
+                                        "E_1/2": val_half, "E_pa": s_ox['E'], "E_pc": s_red['E'],
+                                        "I_pa": s_ox['I'], "I_pc": s_red['I']
+                                    })
                     else:
-                        c_s1, c_s2 = st.columns(2)
-                        ox_map = {f"{p['E']:.3f} V": p for p in d_top}
-                        red_map = {f"{p['E']:.3f} V": p for p in d_btm}
-                        k_ox = c_s1.selectbox("酸化ピーク", list(ox_map.keys())) if ox_map else None
-                        k_red = c_s2.selectbox("還元ピーク", list(red_map.keys())) if red_map else None
-
-                        if k_ox and k_red:
-                            s_ox, s_red = ox_map[k_ox], red_map[k_red]
-                            val_half = (s_ox['E'] + s_red['E']) / 2
-                            st.success(f"**$E_{{1/2}}$ = {val_half:.4f} V**")
-                            if st.button("このペアを登録 💾"):
-                                st.session_state['pair_results'].append({
-                                    "File": sel_file.name, "Cycle": cy_info,
-                                    "E_1/2": val_half, "E_pa": s_ox['E'], "E_pc": s_red['E'],
-                                    "I_pa": s_ox['I'], "I_pc": s_red['I']
-                                })
+                         st.error("データ範囲エラー")
 
                 with col_R:
                     fig = go.Figure()
                     fig.add_trace(go.Scatter(x=active_v, y=active_i, mode='lines', line=dict(color='black', width=2), name="Current"))
-                    fig.add_trace(go.Scatter(x=v_r, y=i_r, mode='lines', line=dict(color='orange', width=4), opacity=0.3, showlegend=False))
+                    if 'v_r' in locals() and len(v_r) > 0:
+                        fig.add_trace(go.Scatter(x=v_r, y=i_r, mode='lines', line=dict(color='orange', width=4), opacity=0.3, showlegend=False))
                     
                     if d_top:
                         fig.add_trace(go.Scatter(x=[p['E'] for p in d_top], y=[p['I'] for p in d_top], mode='markers', marker=dict(color='red', size=7, symbol='circle-open'), name="Ox Cand."))
