@@ -164,47 +164,44 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 ])
 
 # ==========================================
-# Tab 1: 校正 (Modified)
+# Tab 1: 校正 (Modified: Collapsible Sections)
 # ==========================================
 with tab1:
     st.header("標準物質による基準電位の決定")
     fc_file = st.file_uploader("標準物質 (例: Ferrocene)", type=['csv', 'txt', 'dat'], key="fc_u")
     
     if fc_file:
-        # --- 1. ファイルプレビュー機能 ---
-        st.markdown("##### 📄 ファイルプレビュー (先頭5行)")
-        try:
-            fc_file.seek(0)
-            # 生データを少しだけ読んで表示 (列構造の確認用)
-            df_preview = pd.read_csv(fc_file, header=None, nrows=5, sep=data_sep if data_sep != 'auto' else None, engine='python')
-            st.dataframe(df_preview)
-        except Exception as e:
-            st.error(f"プレビューを表示できませんでした: {e}")
-        fc_file.seek(0) # ポインタを戻す
+        # --- 1. ファイルプレビュー機能 (折りたたみ) ---
+        with st.expander("📄 ファイルプレビュー (先頭5行)", expanded=True):
+            try:
+                fc_file.seek(0)
+                # 生データを少しだけ読んで表示 (列構造の確認用)
+                df_preview = pd.read_csv(fc_file, header=None, nrows=5, sep=data_sep if data_sep != 'auto' else None, engine='python')
+                st.dataframe(df_preview, use_container_width=True)
+            except Exception as e:
+                st.error(f"プレビューを表示できませんでした: {e}")
+            fc_file.seek(0) # ポインタを戻す
 
-        # --- 2. 設定フォームと再プロットボタン ---
-        with st.form(key='fc_settings_form'):
-            st.markdown("##### ⚙️ 読み込み・解析設定")
-            c_set1, c_set2, c_set3 = st.columns(3)
-            # デフォルトはサイドバーの値を入れるが、ここで個別変更可能にする
-            fc_x_col = c_set1.number_input("横軸 (E) 列", value=x_col_idx, min_value=1, key="fc_x")
-            fc_y_col = c_set2.number_input("縦軸 (I) 列", value=y_col_idx, min_value=1, key="fc_y")
-            fc_skip = c_set3.number_input("ヘッダー行数", value=skip_rows, min_value=0, key="fc_skip")
-            
-            st.markdown("---")
-            st.markdown("**ピーク探索範囲 (V)**")
-            c_fc1, c_fc2 = st.columns(2)
-            # ファイルを読んでからデフォルト値を決めるため、ここでは固定値か、前回の値を保持したいが
-            # シンプルにするため、フォーム外で計算するか、あるいは固定初期値にする
-            # フォーム内だと動的な値の変更が難しいため、あえてユーザー入力待ちにする
-            s_min = c_fc1.number_input("探索 Min", value=-1.0, step=0.1)
-            s_max = c_fc2.number_input("探索 Max", value=1.0, step=0.1)
-            
-            submit_btn = st.form_submit_button("解析実行 / 再プロット")
+        # --- 2. 設定フォーム (折りたたみ) ---
+        with st.expander("⚙️ 読み込み・解析設定", expanded=True):
+            with st.form(key='fc_settings_form'):
+                st.markdown("**列・ヘッダー指定**")
+                c_set1, c_set2, c_set3 = st.columns(3)
+                fc_x_col = c_set1.number_input("横軸 (E) 列", value=x_col_idx, min_value=1, key="fc_x")
+                fc_y_col = c_set2.number_input("縦軸 (I) 列", value=y_col_idx, min_value=1, key="fc_y")
+                fc_skip = c_set3.number_input("ヘッダー行数", value=skip_rows, min_value=0, key="fc_skip")
+                
+                st.markdown("**ピーク探索範囲 (V)**")
+                c_fc1, c_fc2 = st.columns(2)
+                s_min = c_fc1.number_input("探索 Min", value=-1.0, step=0.1)
+                s_max = c_fc2.number_input("探索 Max", value=1.0, step=0.1)
+                
+                st.markdown("---")
+                submit_btn = st.form_submit_button("解析実行 / 再プロット")
 
         # --- 3. 解析ロジック ---
         if submit_btn:
-            # データのロード (指定されたローカル設定を使用)
+            # データのロード
             df_fc = load_data(fc_file, fc_skip, sep=data_sep)
             
             if df_fc is not None and df_fc.shape[1] >= max(fc_x_col, fc_y_col):
@@ -222,7 +219,7 @@ with tab1:
                     E_pc, I_pc = v_roi[idx_min], i_roi[idx_min]
                     E_half = (E_pa + E_pc)/2
                     
-                    # 結果をsession_stateに保存 (ボタン押下後の描画維持のため)
+                    # 結果をsession_stateに保存
                     st.session_state['temp_fc_results'] = {
                         "v_fc": v_fc, "i_fc": i_fc,
                         "E_pa": E_pa, "I_pa": I_pa,
@@ -237,15 +234,24 @@ with tab1:
                 st.error("指定された列番号がデータ範囲外です。プレビューを確認して修正してください。")
                 st.session_state['temp_fc_results'] = None
 
-        # --- 4. 結果表示と校正ボタン (フォームの外に配置) ---
+        # --- 4. 結果表示と校正ボタン ---
         if st.session_state['temp_fc_results'] is not None:
             res = st.session_state['temp_fc_results']
             
-            # 結果表示
+            st.divider()
+            st.markdown("### 📊 解析結果")
+            
+            # 結果数値
             res1, res2, res3 = st.columns(3)
             res1.metric("酸化 Epa", f"{res['E_pa']:.3f} V")
             res2.metric("還元 Epc", f"{res['E_pc']:.3f} V")
             res3.metric("式量電位 E1/2", f"{res['E_half']:.3f} V")
+            
+            # 校正ボタン
+            if st.button("👉 この値を基準 (0 V) に設定する"):
+                st.session_state['calibration_shift'] = res['E_half']
+                st.session_state['is_calibrated'] = True
+                st.success(f"校正完了: Shift = {res['E_half']:.4f} V")
             
             # グラフ描画
             fig = go.Figure()
@@ -255,12 +261,6 @@ with tab1:
             fig.add_vline(x=res['E_half'], line_dash='dash', line_color='green')
             fig = update_fig_layout(fig, f"Standard ({res['filename']})", "V", "A", show_grid, show_mirror, show_ticks, axis_width, font_size)
             st.plotly_chart(fig, use_container_width=True)
-            
-            # 校正ボタン (フォーム外なので動作する)
-            if st.button("基準 (0 V) に設定"):
-                st.session_state['calibration_shift'] = res['E_half']
-                st.session_state['is_calibrated'] = True
-                st.success(f"校正完了: Shift = {res['E_half']:.4f} V")
 
 # ==========================================
 # Tab 2: 個別解析 (ピーク検出 & ペア登録)
@@ -317,7 +317,7 @@ with tab2:
                     mask = (active_v >= p_min) & (active_v <= p_max)
                     v_r, i_r = active_v[mask], active_i[mask]
                     d_top, d_btm = [], []
-                    if len(v_roi) > 0: # Check logic
+                    if len(v_r) > 0:
                         d_top, d_btm = detect_multiple_peaks(v_r, i_r, prom)
                     
                     st.caption(f"検出: 酸化{len(d_top)} / 還元{len(d_btm)}")
