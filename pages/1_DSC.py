@@ -78,6 +78,10 @@ if target_file:
         # --- スタイル設定 ---
         st.sidebar.markdown("---")
         st.sidebar.subheader("3. 表示スタイル")
+        
+        # --- 追加機能: 凡例表示スイッチ ---
+        show_legend = st.sidebar.checkbox("凡例 (Legend) を表示", value=True)
+        
         tick_dir = st.sidebar.radio("目盛の向き", ["in (内向き)", "out (外向き)"], index=1, horizontal=True).split()[0]
         line_width = st.sidebar.slider("線の太さ", 0.5, 5.0, 1.5, 0.5)
         font_size = st.sidebar.slider("文字の大きさ", 8, 24, 12, 1)
@@ -111,7 +115,7 @@ if target_file:
                         s_def = [30, 800][i] if i < 2 else 0
                         e_def = [700, 1750][i] if i < 2 else total
                         
-                        # --- 変更点1: 表示切り替えチェックボックスの追加 ---
+                        # Curve表示スイッチ
                         is_visible = st.checkbox(f"Curve {i+1} を表示", value=True, key=f"visible_{i}")
                         
                         c1, c2 = st.columns(2)
@@ -122,7 +126,6 @@ if target_file:
                         color = c3.color_picker(f"色", ["#FF4B4B", "#1F77B4"][i] if i < 2 else "#333333", key=f"c{i}")
                         offset = c4.number_input(f"Yオフセット", value=0.0, step=0.1, key=f"o{i}")
                         
-                        # 設定辞書に visible フラグを追加
                         plot_configs.append({
                             "start": start, 
                             "end": end, 
@@ -143,7 +146,6 @@ if target_file:
                 ax.tick_params(direction=tick_dir, top=True, right=True)
                 
                 for config in plot_configs:
-                    # --- 変更点2: visibleがTrueの場合のみプロット ---
                     if config["visible"]:
                         sub = df.iloc[config["start"]:config["end"]]
                         if not sub.empty:
@@ -154,9 +156,10 @@ if target_file:
                 ax.set_xlabel(x_lab)
                 ax.set_ylabel(y_lab)
                 
-                # 凡例（表示されているデータがある場合のみ表示）
+                # --- 修正点: 凡例表示制御 ---
                 handles, labels = ax.get_legend_handles_labels()
-                if handles:
+                # ハンドルが存在し、かつユーザーが凡例表示を選択している場合のみ表示
+                if handles and show_legend:
                     ax.legend(frameon=False, fontsize=font_size*0.8)
                 
                 st.pyplot(fig)
@@ -184,7 +187,7 @@ with cols[1]:
     st.markdown("**2. スタイルの調整**")
     st.caption("論文用には目盛を 'in' に、プレゼン用には文字サイズを大きく設定するのがおすすめです。")
 with cols[2]:
-    st.markdown("**3. 複数スキャンの分割・表示切替**")
-    st.caption("行番号で分割し、オフセットで見やすく配置できます。「Curve X を表示」チェックボックスで特定の曲線を一時的に隠せます。")
+    st.markdown("**3. 複数スキャンの制御**")
+    st.caption("各Curveや凡例（Legend）の表示/非表示をチェックボックスで切り替えられます。")
 
 plt.close('all')
