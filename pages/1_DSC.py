@@ -75,7 +75,7 @@ if target_file:
         col_x = st.sidebar.selectbox("X軸列", columns, index=1 if len(columns)>1 else 0)
         col_y = st.sidebar.selectbox("Y軸列", columns, index=2 if len(columns)>2 else 0)
 
-        # --- スタイル設定（追加項目） ---
+        # --- スタイル設定 ---
         st.sidebar.markdown("---")
         st.sidebar.subheader("3. 表示スタイル")
         tick_dir = st.sidebar.radio("目盛の向き", ["in (内向き)", "out (外向き)"], index=1, horizontal=True).split()[0]
@@ -91,7 +91,7 @@ if target_file:
         x_max = c_x2.number_input("X最大", value=float(df[col_x].max()))
 
         # --- メインレイアウト ---
-        # グラフプレビュー（中央を60%に絞ることでさらに小さく表示）
+        # グラフプレビュー
         graph_area = st.container()
         st.divider()
         settings_area = st.container()
@@ -102,6 +102,7 @@ if target_file:
             st.subheader("プロット範囲・オフセット設定")
             n_plots = st.number_input("プロット数", 1, 10, 2)
             s_cols = st.columns(2)
+            
             for i in range(n_plots):
                 with s_cols[i % 2]:
                     with st.expander(f"Curve {i+1} の設定", expanded=True):
@@ -109,6 +110,9 @@ if target_file:
                         # デフォルト値の自動割り振り
                         s_def = [30, 800][i] if i < 2 else 0
                         e_def = [700, 1750][i] if i < 2 else total
+                        
+                        # --- 変更点1: 表示切り替えチェックボックスの追加 ---
+                        is_visible = st.checkbox(f"Curve {i+1} を表示", value=True, key=f"visible_{i}")
                         
                         c1, c2 = st.columns(2)
                         start = c1.number_input(f"開始行", 0, total, s_def, key=f"s{i}")
@@ -118,30 +122,42 @@ if target_file:
                         color = c3.color_picker(f"色", ["#FF4B4B", "#1F77B4"][i] if i < 2 else "#333333", key=f"c{i}")
                         offset = c4.number_input(f"Yオフセット", value=0.0, step=0.1, key=f"o{i}")
                         
-                        plot_configs.append({"start": start, "end": end, "color": color, "offset": offset, "label": f"Scan {i+1}"})
+                        # 設定辞書に visible フラグを追加
+                        plot_configs.append({
+                            "start": start, 
+                            "end": end, 
+                            "color": color, 
+                            "offset": offset, 
+                            "label": f"Scan {i+1}",
+                            "visible": is_visible
+                        })
 
         # グラフ描画実行
         with graph_area:
-            # st.subheader("グラフプレビュー")
-            # 左右に20%ずつのマージンを設けて中央60%を使用（以前の8割程度のサイズ感）
             _, center_col, _ = st.columns([0.2, 0.6, 0.2])
             
             with center_col:
                 plt.rcParams['font.size'] = font_size
-                fig, ax = plt.subplots(figsize=(6, 4)) # フィギュアサイズ自体も少し小さめに設定
+                fig, ax = plt.subplots(figsize=(6, 4))
                 
                 ax.tick_params(direction=tick_dir, top=True, right=True)
                 
                 for config in plot_configs:
-                    sub = df.iloc[config["start"]:config["end"]]
-                    if not sub.empty:
-                        ax.plot(sub[col_x], sub[col_y] + config["offset"], 
-                                color=config["color"], linewidth=line_width, label=config["label"])
+                    # --- 変更点2: visibleがTrueの場合のみプロット ---
+                    if config["visible"]:
+                        sub = df.iloc[config["start"]:config["end"]]
+                        if not sub.empty:
+                            ax.plot(sub[col_x], sub[col_y] + config["offset"], 
+                                    color=config["color"], linewidth=line_width, label=config["label"])
                 
                 ax.set_xlim(x_min, x_max)
                 ax.set_xlabel(x_lab)
                 ax.set_ylabel(y_lab)
-                ax.legend(frameon=False, fontsize=font_size*0.8)
+                
+                # 凡例（表示されているデータがある場合のみ表示）
+                handles, labels = ax.get_legend_handles_labels()
+                if handles:
+                    ax.legend(frameon=False, fontsize=font_size*0.8)
                 
                 st.pyplot(fig)
                 
@@ -155,7 +171,7 @@ else:
     st.info("左側のサイドバーからデータをアップロードしてください。")
 
 # ---------------------------------------------------------
-# 使い方説明（一番下に配置）
+# 使い方説明
 # ---------------------------------------------------------
 st.markdown("<br><br>", unsafe_allow_html=True)
 st.divider()
@@ -168,7 +184,7 @@ with cols[1]:
     st.markdown("**2. スタイルの調整**")
     st.caption("論文用には目盛を 'in' に、プレゼン用には文字サイズを大きく設定するのがおすすめです。")
 with cols[2]:
-    st.markdown("**3. 複数スキャンの分割**")
-    st.caption("1つのファイルに往復のデータが含まれる場合、行番号を指定して分割し、オフセットで見やすく配置できます。")
+    st.markdown("**3. 複数スキャンの分割・表示切替**")
+    st.caption("行番号で分割し、オフセットで見やすく配置できます。「Curve X を表示」チェックボックスで特定の曲線を一時的に隠せます。")
 
 plt.close('all')
